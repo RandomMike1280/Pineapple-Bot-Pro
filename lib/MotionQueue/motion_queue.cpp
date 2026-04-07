@@ -30,6 +30,57 @@ float MotionQueue::_getSpeedMmS(SpeedLevel level) const {
 // Enqueue a new motion segment
 // ============================================================================
 
+bool MotionQueue::enqueueWaypoint(float target_x, float target_y,
+                                  SpeedLevel speed, CorrectionPolicy policy,
+                                  float currentX, float currentY) {
+    if (_count >= MQ_MAX_SEGMENTS) return false;
+
+    MotionSegment &seg = _segments[_tail % MQ_MAX_SEGMENTS];
+    seg.direction       = MoveDirection::INVALID;  // Not a discrete direction
+    seg.speed           = speed;
+    seg.correctionPolicy = policy;
+    seg.state           = SegmentState::PENDING;
+    seg.traveled_mm     = 0;
+    seg.deferred_correction_x = 0;
+    seg.deferred_correction_y = 0;
+
+    // Determine start position for this segment
+    if (_count == 0) {
+        seg.start_x = currentX;
+        seg.start_y = currentY;
+    } else {
+        const MotionSegment &prev = _segments[(_tail - 1 + MQ_MAX_SEGMENTS) % MQ_MAX_SEGMENTS];
+        seg.start_x = prev.target_x;
+        seg.start_y = prev.target_y;
+    }
+
+    seg.target_x = target_x;
+    seg.target_y = target_y;
+
+    // Calculate displacement vector
+    float dx = target_x - seg.start_x;
+    float dy = target_y - seg.start_y;
+    float dist = sqrtf(dx * dx + dy * dy);
+    seg.distance_mm = (uint16_t)dist;
+
+    // Calculate normalized direction vector
+    float dirX = 0, dirY = 0;
+    if (dist > 0.001f) {
+        dirX = dx / dist;
+        dirY = dy / dist;
+    }
+
+    float spd = _getSpeedMmS(speed);
+    seg.speed_mm_s = spd;
+    seg.vx_mm_s = dirX * spd;
+    seg.vy_mm_s = dirY * spd;
+
+    _tail = (_tail + 1) % MQ_MAX_SEGMENTS;
+    _count++;
+    return true;
+}
+// ============================================================================
+
 bool MotionQueue::enqueue(MoveDirection direction, uint16_t distance_mm,
                           SpeedLevel speed, CorrectionPolicy policy,
                           float currentX, float currentY) {

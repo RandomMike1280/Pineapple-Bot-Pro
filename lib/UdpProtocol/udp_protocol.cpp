@@ -101,6 +101,16 @@ bool parseUdpMessage(const char* buffer, int len, UdpMessage &out) {
                     out.speed != SpeedLevel::INVALID &&
                     out.correctionPolicy != CorrectionPolicy::INVALID);
 
+        case 'W': // WAYPOINT — W:<target_x>:<target_y>:<speed>:<policy>
+            if (numTokens < 5) return false;
+            out.type = MsgType::WAYPOINT;
+            out.target_x        = atof(tokens[1]);
+            out.target_y        = atof(tokens[2]);
+            out.speed           = parseSpeed(tokens[3]);
+            out.correctionPolicy = parsePolicy(tokens[4]);
+            return (out.speed != SpeedLevel::INVALID &&
+                    out.correctionPolicy != CorrectionPolicy::INVALID);
+
         case 'C': // CAM — C:<timestamp>:<x>:<y>
             if (numTokens < 4) return false;
             out.type = MsgType::CAM;

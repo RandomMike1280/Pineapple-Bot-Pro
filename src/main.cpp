@@ -102,14 +102,15 @@ void applyMotors() {
     // Determine duty cycle from the active segment's speed level
     const MotionSegment* seg = motionQueue.currentSegment();
     int duty = seg ? getMotorDuty(seg->speed) : DUTY_NORMAL;
+    float max_speed = seg ? seg->speed_mm_s : 250.0f;
 
-    // Convert velocity direction to mecanum V/H components
+    // Convert continuous velocity vector to proportional mecanum V/H components
     // vx > 0 = right = strafe, vy > 0 = forward
     int V = 0, H = 0;
-    if (vy > 0)       V =  duty;
-    else if (vy < 0)  V = -duty;
-    if (vx > 0)       H =  duty;
-    else if (vx < 0)  H = -duty;
+    if (max_speed > 0.1f) {
+        V = (int)((vy / max_speed) * duty);
+        H = (int)((vx / max_speed) * duty);
+    }
 
     MecanumSpeeds s = computeMecanumSpeeds(V, H, 0);
     Motor1.Run(s.m1);
@@ -153,6 +154,25 @@ void handleIncomingUdp() {
                     (int)msg.correctionPolicy, motionQueue.remaining());
             } else {
                 Serial.println("[CMD] MOVE rejected — queue full!");
+            }
+            break;
+        }
+
+        case MsgType::WAYPOINT: {
+            float cx, cy;
+            deadReckoning.getCurrentPosition(cx, cy);
+
+            bool ok = motionQueue.enqueueWaypoint(
+                msg.target_x, msg.target_y,
+                msg.speed, msg.correctionPolicy,
+                cx, cy
+            );
+            if (ok) {
+                Serial.printf("[CMD] WAYPOINT queued: target=(%.1f, %.1f) spd=%d policy=%d (queue=%d)\n",
+                    msg.target_x, msg.target_y, (int)msg.speed,
+                    (int)msg.correctionPolicy, motionQueue.remaining());
+            } else {
+                Serial.println("[CMD] WAYPOINT rejected — queue full!");
             }
             break;
         }

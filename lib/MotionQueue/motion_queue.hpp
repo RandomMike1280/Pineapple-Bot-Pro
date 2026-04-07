@@ -63,6 +63,13 @@ public:
                  SpeedLevel speed, CorrectionPolicy policy,
                  float currentX, float currentY);
 
+    /// Enqueue a new waypoint motion segment (absolute coordinate).
+    /// @param currentX, currentY current estimated position for computing targets
+    /// @returns true if enqueued, false if queue is full
+    bool enqueueWaypoint(float target_x, float target_y,
+                         SpeedLevel speed, CorrectionPolicy policy,
+                         float currentX, float currentY);
+
     /// Called every control-loop tick.  Returns true if there is an active
     /// segment being executed.
     /// @param dt_ms elapsed time since last call
