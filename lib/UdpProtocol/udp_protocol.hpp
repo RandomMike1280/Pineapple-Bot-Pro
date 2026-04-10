@@ -12,7 +12,8 @@
 //   HELLO     H:<robot_id>
 //   MOVE      M:<dir>:<dist_mm>:<speed>:<policy>
 //   WAYPOINT  W:<target_x>:<target_y>:<speed>:<policy>
-//   CAM       C:<timestamp_ms>:<x_mm>:<y_mm>
+//   ROTATE    T:<target_angle_deg>:<speed>:<policy>
+//   CAM       C:<timestamp_ms>:<x_mm>:<y_mm>[:<angle_deg>]
 //   PING      P:<timestamp_ms>
 //   PONG      Q:<orig_timestamp_ms>
 //   STATUS    S:<x>:<y>:<queue_len>:<drift_mm>
@@ -30,6 +31,7 @@ enum class MsgType : uint8_t {
     ABORT,
     REGISTER,
     WAYPOINT,
+    ROTATE,
     UNKNOWN
 };
 
@@ -69,10 +71,14 @@ struct UdpMessage {
     float         target_x;
     float         target_y;
 
+    // ROTATE fields
+    float         target_angle;
+
     // CAM fields
     uint32_t cam_timestamp;
     float    cam_x;
     float    cam_y;
+    float    cam_angle;
 
     // PING/PONG fields
     uint32_t ping_timestamp;

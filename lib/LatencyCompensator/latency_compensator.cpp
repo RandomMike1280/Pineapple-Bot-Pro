@@ -8,7 +8,7 @@
 LatencyCompensator::LatencyCompensator()
     : _dr(nullptr), _mq(nullptr),
       _rttMs(100), _rttInitialized(false),
-      _lastDriftX(0), _lastDriftY(0), _lastDriftMagnitude(0),
+      _lastDriftX(0), _lastDriftY(0), _lastDriftAngle(0), _lastDriftMagnitude(0),
       _emergencyTriggered(false),
       _driftThresholdMm(20.0f),
       _emergencyThresholdMm(50.0f)
@@ -47,7 +47,7 @@ void LatencyCompensator::setThresholds(float driftThresholdMm, float emergencyTh
 // ============================================================================
 
 void LatencyCompensator::onCameraUpdate(uint32_t phoneTimestamp,
-                                         float observedX, float observedY,
+                                         float observedX, float observedY, float observedAngle,
                                          uint32_t correctionBlendMs) {
     if (_dr == nullptr || _mq == nullptr) return;
 
@@ -58,8 +58,8 @@ void LatencyCompensator::onCameraUpdate(uint32_t phoneTimestamp,
     uint32_t captureTime = phoneTimestamp - (_rttMs / 2);
 
     // Step 2: Look up our estimated position at that time
-    float estX, estY;
-    bool found = _dr->getPositionAt(captureTime, estX, estY);
+    float estX, estY, estAngle;
+    bool found = _dr->getPositionAt(captureTime, estX, estY, estAngle);
     if (!found) {
         // Observation is too old — our history doesn't go back that far.
         // This can happen if RTT is very high.  Skip this observation.
@@ -70,6 +70,12 @@ void LatencyCompensator::onCameraUpdate(uint32_t phoneTimestamp,
     // Step 3: Compute the drift error
     _lastDriftX = observedX - estX;
     _lastDriftY = observedY - estY;
+    _lastDriftAngle = observedAngle - estAngle;
+    
+    // Normalize angle error to [-180, 180]
+    while (_lastDriftAngle > 180.0f) _lastDriftAngle -= 360.0f;
+    while (_lastDriftAngle < -180.0f) _lastDriftAngle += 360.0f;
+
     _lastDriftMagnitude = sqrtf(_lastDriftX * _lastDriftX + _lastDriftY * _lastDriftY);
 
     // Step 4: Apply correction based on the active segment's policy
@@ -82,7 +88,7 @@ void LatencyCompensator::onCameraUpdate(uint32_t phoneTimestamp,
 
     if (policy == CorrectionPolicy::DEFERRED) {
         // Store the correction for application at segment boundary
-        _mq->storeDeferredCorrection(_lastDriftX, _lastDriftY);
+        _mq->storeDeferredCorrection(_lastDriftX, _lastDriftY, _lastDriftAngle);
         return;
     }
 
@@ -98,15 +104,15 @@ void LatencyCompensator::onCameraUpdate(uint32_t phoneTimestamp,
         _emergencyTriggered = true;
         Serial.printf("[LC] EMERGENCY drift: %.1f mm — decelerating\n", _lastDriftMagnitude);
         // Apply immediate correction with shorter blend
-        _dr->applyCorrection(_lastDriftX, _lastDriftY, correctionBlendMs / 2);
-    } else if (_lastDriftMagnitude > _driftThresholdMm) {
+        _dr->applyCorrection(_lastDriftX, _lastDriftY, _lastDriftAngle, correctionBlendMs / 2);
+    } else if (_lastDriftMagnitude > _driftThresholdMm || abs(_lastDriftAngle) > 2.0f) {
         // Significant drift — apply full correction
-        Serial.printf("[LC] Correcting drift: %.1f mm (err: %.1f, %.1f)\n",
-                      _lastDriftMagnitude, _lastDriftX, _lastDriftY);
-        _dr->applyCorrection(_lastDriftX, _lastDriftY, correctionBlendMs);
+        Serial.printf("[LC] Correcting drift: %.1f mm / %.1f deg (err: %.1f, %.1f)\n",
+                      _lastDriftMagnitude, _lastDriftAngle, _lastDriftX, _lastDriftY);
+        _dr->applyCorrection(_lastDriftX, _lastDriftY, _lastDriftAngle, correctionBlendMs);
     } else {
         // Minor drift — apply gentle partial correction (50%)
-        _dr->applyCorrection(_lastDriftX * 0.5f, _lastDriftY * 0.5f, correctionBlendMs);
+        _dr->applyCorrection(_lastDriftX * 0.5f, _lastDriftY * 0.5f, _lastDriftAngle * 0.5f, correctionBlendMs);
     }
 }
 

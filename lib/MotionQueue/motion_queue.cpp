@@ -32,7 +32,7 @@ float MotionQueue::_getSpeedMmS(SpeedLevel level) const {
 
 bool MotionQueue::enqueueWaypoint(float target_x, float target_y,
                                   SpeedLevel speed, CorrectionPolicy policy,
-                                  float currentX, float currentY) {
+                                  float currentX, float currentY, float currentAngle) {
     if (_count >= MQ_MAX_SEGMENTS) return false;
 
     MotionSegment &seg = _segments[_tail % MQ_MAX_SEGMENTS];
@@ -43,17 +43,21 @@ bool MotionQueue::enqueueWaypoint(float target_x, float target_y,
     seg.traveled_mm     = 0;
     seg.deferred_correction_x = 0;
     seg.deferred_correction_y = 0;
+    seg.deferred_correction_angle = 0;
 
     // Determine start position for this segment
     if (_count == 0) {
         seg.start_x = currentX;
         seg.start_y = currentY;
+        seg.start_angle = currentAngle;
     } else {
         const MotionSegment &prev = _segments[(_tail - 1 + MQ_MAX_SEGMENTS) % MQ_MAX_SEGMENTS];
         seg.start_x = prev.target_x;
         seg.start_y = prev.target_y;
+        seg.start_angle = prev.target_angle;
     }
 
+    seg.target_angle = seg.start_angle;
     seg.target_x = target_x;
     seg.target_y = target_y;
 
@@ -74,6 +78,57 @@ bool MotionQueue::enqueueWaypoint(float target_x, float target_y,
     seg.speed_mm_s = spd;
     seg.vx_mm_s = dirX * spd;
     seg.vy_mm_s = dirY * spd;
+    seg.omega_deg_s = 0;
+
+    _tail = (_tail + 1) % MQ_MAX_SEGMENTS;
+    _count++;
+    return true;
+}
+// ============================================================================
+
+bool MotionQueue::enqueueRotate(float target_angle,
+                                  SpeedLevel speed, CorrectionPolicy policy,
+                                  float currentX, float currentY, float currentAngle) {
+    if (_count >= MQ_MAX_SEGMENTS) return false;
+
+    MotionSegment &seg = _segments[_tail % MQ_MAX_SEGMENTS];
+    seg.direction       = MoveDirection::INVALID;
+    seg.speed           = speed;
+    seg.correctionPolicy = policy;
+    seg.state           = SegmentState::PENDING;
+    seg.traveled_mm     = 0;
+    seg.deferred_correction_x = 0;
+    seg.deferred_correction_y = 0;
+
+    if (_count == 0) {
+        seg.start_x = currentX;
+        seg.start_y = currentY;
+        seg.start_angle = currentAngle;
+    } else {
+        const MotionSegment &prev = _segments[(_tail - 1 + MQ_MAX_SEGMENTS) % MQ_MAX_SEGMENTS];
+        seg.start_x = prev.target_x;
+        seg.start_y = prev.target_y;
+        seg.start_angle = prev.target_angle;
+    }
+
+    seg.target_x = seg.start_x;
+    seg.target_y = seg.start_y;
+    seg.target_angle = target_angle;
+
+    float d_angle = target_angle - seg.start_angle;
+    while (d_angle > 180.0f) d_angle -= 360.0f;
+    while (d_angle < -180.0f) d_angle += 360.0f;
+
+    seg.distance_mm = (uint16_t)abs(d_angle);
+    float spd = _getSpeedMmS(speed); // Treat as deg/s
+    seg.speed_mm_s = spd;
+    seg.vx_mm_s = 0;
+    seg.vy_mm_s = 0;
+    if (abs(d_angle) > 0.001f) {
+        seg.omega_deg_s = (d_angle > 0) ? spd : -spd;
+    } else {
+        seg.omega_deg_s = 0;
+    }
 
     _tail = (_tail + 1) % MQ_MAX_SEGMENTS;
     _count++;
@@ -83,7 +138,7 @@ bool MotionQueue::enqueueWaypoint(float target_x, float target_y,
 
 bool MotionQueue::enqueue(MoveDirection direction, uint16_t distance_mm,
                           SpeedLevel speed, CorrectionPolicy policy,
-                          float currentX, float currentY) {
+                          float currentX, float currentY, float currentAngle) {
     if (_count >= MQ_MAX_SEGMENTS) return false;
 
     MotionSegment &seg = _segments[_tail % MQ_MAX_SEGMENTS];
@@ -105,19 +160,23 @@ bool MotionQueue::enqueue(MoveDirection direction, uint16_t distance_mm,
     seg.vy_mm_s = dirY * spd;
 
     // Compute target position relative to where queue will be when this
-    // segment starts.  For the first segment, that's currentX/Y.
+    // segment starts.  For the first segment, that's currentX/Y/Angle.
     // For subsequent segments, chain from previous target.
     if (_count == 0) {
         seg.start_x = currentX;
         seg.start_y = currentY;
+        seg.start_angle = currentAngle;
     } else {
         // Chain from the previous segment's target
         const MotionSegment &prev = _segments[(_tail - 1 + MQ_MAX_SEGMENTS) % MQ_MAX_SEGMENTS];
         seg.start_x = prev.target_x;
         seg.start_y = prev.target_y;
+        seg.start_angle = prev.target_angle;
     }
     seg.target_x = seg.start_x + dirX * distance_mm;
     seg.target_y = seg.start_y + dirY * distance_mm;
+    seg.target_angle = seg.start_angle;
+    seg.omega_deg_s = 0;
 
     _tail = (_tail + 1) % MQ_MAX_SEGMENTS;
     _count++;
@@ -175,19 +234,22 @@ void MotionQueue::_advanceToNext() {
 // Accessors
 // ============================================================================
 
-void MotionQueue::getCurrentVelocity(float &vx_mm_s, float &vy_mm_s) const {
+void MotionQueue::getCurrentVelocity(float &vx_mm_s, float &vy_mm_s, float &omega_deg_s) const {
     if (_count == 0) {
         vx_mm_s = 0;
         vy_mm_s = 0;
+        omega_deg_s = 0;
         return;
     }
     const MotionSegment &seg = _segments[_head % MQ_MAX_SEGMENTS];
     if (seg.state == SegmentState::ACTIVE) {
         vx_mm_s = seg.vx_mm_s;
         vy_mm_s = seg.vy_mm_s;
+        omega_deg_s = seg.omega_deg_s;
     } else {
         vx_mm_s = 0;
         vy_mm_s = 0;
+        omega_deg_s = 0;
     }
 }
 
@@ -197,19 +259,21 @@ CorrectionPolicy MotionQueue::getActivePolicy() const {
     return seg.correctionPolicy;
 }
 
-void MotionQueue::storeDeferredCorrection(float errX, float errY) {
+void MotionQueue::storeDeferredCorrection(float errX, float errY, float errAngle) {
     if (_count == 0) return;
     MotionSegment &seg = _segments[_head % MQ_MAX_SEGMENTS];
     seg.deferred_correction_x += errX;
     seg.deferred_correction_y += errY;
+    seg.deferred_correction_angle += errAngle;
 }
 
-void MotionQueue::getDeferredCorrection(float &errX, float &errY) const {
+void MotionQueue::getDeferredCorrection(float &errX, float &errY, float &errAngle) const {
     // Return correction from the segment that just completed
     // (which was at _head - 1 before advance)
     int prevIdx = (_head - 1 + MQ_MAX_SEGMENTS) % MQ_MAX_SEGMENTS;
     errX = _segments[prevIdx].deferred_correction_x;
     errY = _segments[prevIdx].deferred_correction_y;
+    errAngle = _segments[prevIdx].deferred_correction_angle;
 }
 
 int MotionQueue::remaining() const {

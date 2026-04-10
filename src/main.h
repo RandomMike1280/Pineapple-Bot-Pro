@@ -11,6 +11,15 @@
 #define BOT_ID "A"
 
 // ============================================================================
+// Operating Mode
+// ============================================================================
+// #define TEST_MODE // Uncomment to enable test mode (no motors, print commands, blinking LED)
+
+#ifndef LED
+#define LED 2 // Default LED pin if not defined elsewhere
+#endif
+
+// ============================================================================
 // Speed Calibration (mm/s at each speed level)
 // ============================================================================
 // IMPORTANT: Measure these on your actual surface!

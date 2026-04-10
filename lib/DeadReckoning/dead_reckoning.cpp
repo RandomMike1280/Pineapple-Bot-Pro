@@ -5,24 +5,25 @@
 // ============================================================================
 
 DeadReckoning::DeadReckoning()
-    : _x(0), _y(0),
+    : _x(0), _y(0), _angle(0),
       _historyHead(0), _historyCount(0),
-      _corrX(0), _corrY(0),
-      _corrTotalX(0), _corrTotalY(0),
+      _corrX(0), _corrY(0), _corrAngle(0),
+      _corrTotalX(0), _corrTotalY(0), _corrTotalAngle(0),
       _corrStartTime(0), _corrDuration(0),
       _corrActive(false)
 {
     memset(_history, 0, sizeof(_history));
 }
 
-void DeadReckoning::reset(float x0, float y0) {
+void DeadReckoning::reset(float x0, float y0, float angle0) {
     _x = x0;
     _y = y0;
+    _angle = angle0;
     _historyHead  = 0;
     _historyCount = 0;
     _corrActive   = false;
-    _corrX = _corrY = 0;
-    _corrTotalX = _corrTotalY = 0;
+    _corrX = _corrY = _corrAngle = 0;
+    _corrTotalX = _corrTotalY = _corrTotalAngle = 0;
     memset(_history, 0, sizeof(_history));
 }
 
@@ -30,12 +31,13 @@ void DeadReckoning::reset(float x0, float y0) {
 // Core integration — called every control-loop tick (~5-10 ms)
 // ============================================================================
 
-void DeadReckoning::update(float vx_mm_s, float vy_mm_s, uint32_t dt_ms) {
+void DeadReckoning::update(float vx_mm_s, float vy_mm_s, float omega_deg_s, uint32_t dt_ms) {
     if (dt_ms == 0) return;
 
     float dt_s = dt_ms / 1000.0f;
     _x += vx_mm_s * dt_s;
     _y += vy_mm_s * dt_s;
+    _angle += omega_deg_s * dt_s;
 
     // Advance the smooth correction blend (decay remaining correction)
     if (_corrActive) {
@@ -45,7 +47,8 @@ void DeadReckoning::update(float vx_mm_s, float vy_mm_s, uint32_t dt_ms) {
             // Correction fully applied — absorb remainder into raw position
             _x += _corrX;
             _y += _corrY;
-            _corrX = _corrY = 0;
+            _angle += _corrAngle;
+            _corrX = _corrY = _corrAngle = 0;
             _corrActive = false;
         }
     }
@@ -63,6 +66,7 @@ void DeadReckoning::_recordSnapshot(uint32_t now) {
     s.timestamp_ms = now;
     s.x = _x;
     s.y = _y;
+    s.angle = _angle;
     _historyHead++;
     if (_historyCount < DR_HISTORY_SIZE) _historyCount++;
 }
@@ -71,7 +75,7 @@ void DeadReckoning::_recordSnapshot(uint32_t now) {
 // Timestamp-based position lookup (binary search over ring buffer)
 // ============================================================================
 
-bool DeadReckoning::getPositionAt(uint32_t timestamp_ms, float &out_x, float &out_y) const {
+bool DeadReckoning::getPositionAt(uint32_t timestamp_ms, float &out_x, float &out_y, float &out_angle) const {
     if (_historyCount == 0) return false;
 
     // The buffer is a ring; entries are in chronological order from
@@ -88,6 +92,7 @@ bool DeadReckoning::getPositionAt(uint32_t timestamp_ms, float &out_x, float &ou
         // Return most recent
         out_x = _history[newest].x;
         out_y = _history[newest].y;
+        out_angle = _history[newest].angle;
         return true;
     }
 
@@ -117,12 +122,15 @@ bool DeadReckoning::getPositionAt(uint32_t timestamp_ms, float &out_x, float &ou
             float t = (float)(timestamp_ms - a.timestamp_ms) / (float)span;
             out_x = a.x + (b.x - a.x) * t;
             out_y = a.y + (b.y - a.y) * t;
+            // Linearly interpolate angle as well. (Assuming continuous unwrapped angle).
+            out_angle = a.angle + (b.angle - a.angle) * t;
             return true;
         }
     }
 
     out_x = _history[idx].x;
     out_y = _history[idx].y;
+    out_angle = _history[idx].angle;
     return true;
 }
 
@@ -130,18 +138,21 @@ bool DeadReckoning::getPositionAt(uint32_t timestamp_ms, float &out_x, float &ou
 // Smooth correction — blends error over a time window
 // ============================================================================
 
-void DeadReckoning::applyCorrection(float error_x, float error_y, uint32_t blend_ms) {
+void DeadReckoning::applyCorrection(float error_x, float error_y, float error_angle, uint32_t blend_ms) {
     if (blend_ms == 0) {
         // Instant correction
         _x += error_x;
         _y += error_y;
+        _angle += error_angle;
         return;
     }
 
     _corrTotalX   = error_x;
     _corrTotalY   = error_y;
+    _corrTotalAngle = error_angle;
     _corrX        = error_x;
     _corrY        = error_y;
+    _corrAngle    = error_angle;
     _corrStartTime = millis();
     _corrDuration  = blend_ms;
     _corrActive    = true;
@@ -163,18 +174,28 @@ float DeadReckoning::_blendedCorrY() const {
     return _corrTotalY * t;
 }
 
+float DeadReckoning::_blendedCorrAngle() const {
+    if (!_corrActive) return 0.0f;
+    uint32_t elapsed = millis() - _corrStartTime;
+    if (elapsed >= _corrDuration) return _corrTotalAngle;
+    float t = (float)elapsed / (float)_corrDuration;
+    return _corrTotalAngle * t;
+}
+
 // ============================================================================
 // Position accessors
 // ============================================================================
 
-void DeadReckoning::getCurrentPosition(float &out_x, float &out_y) const {
+void DeadReckoning::getCurrentPosition(float &out_x, float &out_y, float &out_angle) const {
     out_x = _x + _blendedCorrX();
     out_y = _y + _blendedCorrY();
+    out_angle = _angle + _blendedCorrAngle();
 }
 
-void DeadReckoning::getRawPosition(float &out_x, float &out_y) const {
+void DeadReckoning::getRawPosition(float &out_x, float &out_y, float &out_angle) const {
     out_x = _x;
     out_y = _y;
+    out_angle = _angle;
 }
 
 float DeadReckoning::getCorrectionMagnitude() const {

@@ -49,6 +49,7 @@ uint32_t lastPingTime   = 0;
 // ============================================================================
 float currentVx = 0;  // mm/s
 float currentVy = 0;  // mm/s
+float currentOmega = 0; // deg/s
 
 // Speed level → motor duty% mapping
 int getMotorDuty(SpeedLevel level) {
@@ -85,17 +86,24 @@ MecanumSpeeds computeMecanumSpeeds(int V, int H, int A) {
 // Apply motor speeds from current motion queue state
 // ============================================================================
 void applyMotors() {
-    float vx, vy;
-    motionQueue.getCurrentVelocity(vx, vy);
+    float vx, vy, omega;
+    motionQueue.getCurrentVelocity(vx, vy, omega);
     currentVx = vx;
     currentVy = vy;
+    currentOmega = omega;
 
-    if (vx == 0 && vy == 0) {
+    static bool was_moving = false;
+    static uint32_t move_start_time = 0;
+
+    if (vx == 0 && vy == 0 && omega == 0) {
+        was_moving = false;
         // No active segment — stop motors
+#ifndef TEST_MODE
         Motor1.Stop();
         Motor2.Stop();
         Motor3.Stop();
         Motor4.Stop();
+#endif
         return;
     }
 
@@ -103,6 +111,17 @@ void applyMotors() {
     const MotionSegment* seg = motionQueue.currentSegment();
     int duty = seg ? getMotorDuty(seg->speed) : DUTY_NORMAL;
     float max_speed = seg ? seg->speed_mm_s : 250.0f;
+
+    // --- KICKSTART LOGIC ---
+    // Break static friction by driving at 100% duty for the first 100ms
+    if (!was_moving) {
+        was_moving = true;
+        move_start_time = millis();
+    }
+    if (millis() - move_start_time < 100) {
+        duty = 100;
+    }
+    // -----------------------
 
     // Convert continuous velocity vector to proportional mecanum V/H components
     // vx > 0 = right = strafe, vy > 0 = forward
@@ -112,11 +131,46 @@ void applyMotors() {
         H = (int)((vx / max_speed) * duty);
     }
 
-    MecanumSpeeds s = computeMecanumSpeeds(V, H, 0);
+    float cx, cy, c_angle;
+    deadReckoning.getCurrentPosition(cx, cy, c_angle);
+    float target_angle = seg ? seg->target_angle : c_angle;
+
+    float angle_err = target_angle - c_angle;
+    while (angle_err > 180.0f) angle_err -= 360.0f;
+    while (angle_err < -180.0f) angle_err += 360.0f;
+
+    int A = 0;
+    if (omega != 0) {
+        // Active rotation segment
+        if (max_speed > 0.1f) {
+            // INVERT omega: Mathematical CCW is positive, but mecanums need A < 0 to spin CCW
+            A = (int)((-omega / max_speed) * duty);
+        }
+    } else {
+        // Pure translation, passively counteract drift
+        float Kp_angle = 1.0f;
+        // INVERT Kp_angle: to counteract CCW drift, push the opposite way
+        A = (int)(-Kp_angle * angle_err);
+        
+        int max_A = 30; // Limit rotational output during translation
+        if (A > max_A) A = max_A;
+        if (A < -max_A) A = -max_A;
+    }
+
+    MecanumSpeeds s = computeMecanumSpeeds(V, H, A);
+
+#ifdef TEST_MODE
+    static unsigned long lastPrintTime = 0;
+    if (millis() - lastPrintTime >= 500) {
+        Serial.printf("[TEST MODE] Virtual Motors: M1=%d, M2=%d, M3=%d, M4=%d\n", s.m1, s.m2, s.m3, s.m4);
+        lastPrintTime = millis();
+    }
+#else
     Motor1.Run(s.m1);
     Motor2.Run(s.m2);
     Motor3.Run(s.m3);
     Motor4.Run(s.m4);
+#endif
 }
 
 // ============================================================================
@@ -131,6 +185,10 @@ void handleIncomingUdp() {
     if (len <= 0) return;
     buffer[len] = '\0';
 
+#ifdef TEST_MODE
+    Serial.printf("[TEST MODE] Received UDP Packet: %s\n", buffer);
+#endif
+
     UdpMessage msg;
     if (!parseUdpMessage(buffer, len, msg)) {
         Serial.printf("[UDP] Failed to parse: %s\n", buffer);
@@ -140,13 +198,13 @@ void handleIncomingUdp() {
     switch (msg.type) {
         case MsgType::MOVE: {
             // Get current estimated position for segment target computation
-            float cx, cy;
-            deadReckoning.getCurrentPosition(cx, cy);
+            float cx, cy, c_angle;
+            deadReckoning.getCurrentPosition(cx, cy, c_angle);
 
             bool ok = motionQueue.enqueue(
                 msg.direction, msg.distance_mm,
                 msg.speed, msg.correctionPolicy,
-                cx, cy
+                cx, cy, c_angle
             );
             if (ok) {
                 Serial.printf("[CMD] MOVE queued: dir=%d dist=%d spd=%d policy=%d (queue=%d)\n",
@@ -159,13 +217,13 @@ void handleIncomingUdp() {
         }
 
         case MsgType::WAYPOINT: {
-            float cx, cy;
-            deadReckoning.getCurrentPosition(cx, cy);
+            float cx, cy, c_angle;
+            deadReckoning.getCurrentPosition(cx, cy, c_angle);
 
             bool ok = motionQueue.enqueueWaypoint(
                 msg.target_x, msg.target_y,
                 msg.speed, msg.correctionPolicy,
-                cx, cy
+                cx, cy, c_angle
             );
             if (ok) {
                 Serial.printf("[CMD] WAYPOINT queued: target=(%.1f, %.1f) spd=%d policy=%d (queue=%d)\n",
@@ -177,9 +235,27 @@ void handleIncomingUdp() {
             break;
         }
 
+        case MsgType::ROTATE: {
+            float cx, cy, c_angle;
+            deadReckoning.getCurrentPosition(cx, cy, c_angle);
+
+            bool ok = motionQueue.enqueueRotate(
+                msg.target_angle, msg.speed, msg.correctionPolicy,
+                cx, cy, c_angle
+            );
+            if (ok) {
+                Serial.printf("[CMD] ROTATE queued: target=%.1f spd=%d policy=%d (queue=%d)\n",
+                    msg.target_angle, (int)msg.speed,
+                    (int)msg.correctionPolicy, motionQueue.remaining());
+            } else {
+                Serial.println("[CMD] ROTATE rejected — queue full!");
+            }
+            break;
+        }
+
         case MsgType::CAM: {
             latencyComp.onCameraUpdate(
-                msg.cam_timestamp, msg.cam_x, msg.cam_y,
+                msg.cam_timestamp, msg.cam_x, msg.cam_y, msg.cam_angle,
                 CORRECTION_BLEND_MS
             );
             break;
@@ -204,11 +280,13 @@ void handleIncomingUdp() {
         case MsgType::ABORT: {
             Serial.println("[CMD] ABORT — emergency stop!");
             motionQueue.abort();
+#ifndef TEST_MODE
             Motor1.Stop();
             Motor2.Stop();
             Motor3.Stop();
             Motor4.Stop();
-            currentVx = currentVy = 0;
+#endif
+            currentVx = currentVy = currentOmega = 0;
             break;
         }
 
@@ -222,8 +300,8 @@ void handleIncomingUdp() {
 // Send telemetry status to phone (every STATUS_INTERVAL_MS)
 // ============================================================================
 void sendStatus() {
-    float x, y;
-    deadReckoning.getCurrentPosition(x, y);
+    float x, y, angle;
+    deadReckoning.getCurrentPosition(x, y, angle);
 
     char buf[64];
     int len = buildStatusMessage(buf, sizeof(buf),
@@ -286,7 +364,10 @@ void setup() {
     udp.begin(udpPort);
 
     // --- Initialize subsystems ---
-    deadReckoning.reset(0, 0);
+    deadReckoning.reset(0, 0, 0);
+
+    Motor1.Reverse();
+    Motor2.Reverse();
 
     motionQueue.setSpeedCalibration(SPEED_SLOW_MM_S, SPEED_NORMAL_MM_S, SPEED_FAST_MM_S);
 
@@ -299,6 +380,13 @@ void setup() {
     udp.beginPacket(phoneIP, udpPort);
     udp.write((uint8_t*)regBuf, regLen);
     udp.endPacket();
+
+#ifdef TEST_MODE
+    Serial.println("\n*** TEST MODE ENABLED ***");
+    Serial.println("Motors are disabled. Commands are printed to Serial.");
+    ledcSetup(7, 10, 12); // Channel 7, 10 kHz, 12-bit resolution
+    ledcAttachPin(LED, 7);
+#endif
 
     Serial.println("\nReady. Waiting for commands...\n");
     lastTick = millis();
@@ -328,22 +416,26 @@ void loop() {
     if (motionQueue.segmentJustCompleted) {
         CorrectionPolicy prevPolicy = motionQueue.getActivePolicy();
         // The just-completed segment's correction is stored
-        float errX, errY;
-        motionQueue.getDeferredCorrection(errX, errY);
+        float errX, errY, errAngle;
+        motionQueue.getDeferredCorrection(errX, errY, errAngle);
         float errMag = sqrtf(errX * errX + errY * errY);
-        if (errMag > 2.0f) {
-            Serial.printf("[MQ] Deferred correction: %.1f mm\n", errMag);
-            deadReckoning.applyCorrection(errX, errY, CORRECTION_BLEND_MS);
+        if (errMag > 2.0f || abs(errAngle) > 2.0f) {
+            Serial.printf("[MQ] Deferred correction: %.1f mm / %.1f deg\n", errMag, errAngle);
+            deadReckoning.applyCorrection(errX, errY, errAngle, CORRECTION_BLEND_MS);
         }
     }
 
     // ---- 3. Handle emergency deceleration ----
     if (latencyComp.wasEmergencyTriggered() && moving) {
         // Briefly stop motors for correction to take effect
+#ifndef TEST_MODE
         Motor1.Stop();
         Motor2.Stop();
         Motor3.Stop();
         Motor4.Stop();
+#else
+        Serial.println("[TEST MODE] Virtual emergency stop pause");
+#endif
         delay(50);  // 50ms pause — short enough to be barely noticeable
     }
 
@@ -351,7 +443,7 @@ void loop() {
     applyMotors();
 
     // ---- 5. Update dead-reckoning ----
-    deadReckoning.update(currentVx, currentVy, dt);
+    deadReckoning.update(currentVx, currentVy, currentOmega, dt);
 
     // ---- 6. Periodic broadcasts ----
     if (now - lastStatusTime >= STATUS_INTERVAL_MS) {
@@ -368,4 +460,15 @@ void loop() {
         sendPing();
         lastPingTime = now;
     }
+
+#ifdef TEST_MODE
+    static uint32_t lastLedBlinkTime = 0;
+    static bool ledState = false;
+    // Blink LED every 500ms
+    if (now - lastLedBlinkTime >= 500) {
+        lastLedBlinkTime = now;
+        ledState = !ledState;
+        ledcWrite(7, ledState ? 2048 : 0);
+    }
+#endif
 }

@@ -30,6 +30,7 @@ void esp32_motor::init()
     config.duty_mode = MCPWM_DUTY_MODE_0;
 
     mcpwm_init(unit, timer, &config);
+    initialized = true;
 }
 
 void esp32_motor::Run(int duty)

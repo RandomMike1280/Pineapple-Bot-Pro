@@ -25,8 +25,9 @@ public:
     /// @param phoneTimestamp  the phone's timestamp when frame was captured (ms)
     /// @param observedX       observed X position in mm
     /// @param observedY       observed Y position in mm
+    /// @param observedAngle   observed angle in degrees
     /// @param correctionBlendMs  time to blend correction (default 200ms)
-    void onCameraUpdate(uint32_t phoneTimestamp, float observedX, float observedY,
+    void onCameraUpdate(uint32_t phoneTimestamp, float observedX, float observedY, float observedAngle,
                         uint32_t correctionBlendMs = 200);
 
     /// Called when a PONG response arrives.
@@ -57,6 +58,7 @@ private:
     // Drift metrics
     float _lastDriftX;
     float _lastDriftY;
+    float _lastDriftAngle;
     float _lastDriftMagnitude;
     bool  _emergencyTriggered;
 

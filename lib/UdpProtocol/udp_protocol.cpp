@@ -111,12 +111,22 @@ bool parseUdpMessage(const char* buffer, int len, UdpMessage &out) {
             return (out.speed != SpeedLevel::INVALID &&
                     out.correctionPolicy != CorrectionPolicy::INVALID);
 
-        case 'C': // CAM — C:<timestamp>:<x>:<y>
+        case 'T': // ROTATE — T:<target_angle>:<speed>:<policy>
+            if (numTokens < 4) return false;
+            out.type = MsgType::ROTATE;
+            out.target_angle    = atof(tokens[1]);
+            out.speed           = parseSpeed(tokens[2]);
+            out.correctionPolicy = parsePolicy(tokens[3]);
+            return (out.speed != SpeedLevel::INVALID &&
+                    out.correctionPolicy != CorrectionPolicy::INVALID);
+
+        case 'C': // CAM — C:<timestamp>:<x>:<y>[:<angle>]
             if (numTokens < 4) return false;
             out.type = MsgType::CAM;
             out.cam_timestamp = (uint32_t)strtoul(tokens[1], NULL, 10);
             out.cam_x = atof(tokens[2]);
             out.cam_y = atof(tokens[3]);
+            out.cam_angle = (numTokens >= 5) ? atof(tokens[4]) : 0.0f;
             return true;
 
         case 'P': // PING — P:<timestamp>
