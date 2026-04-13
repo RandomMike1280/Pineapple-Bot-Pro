@@ -74,6 +74,27 @@ static void rearmKickstart() {
     }
 }
 
+static float motorRampFactor = 0;
+static bool motorWasMoving = false;
+static bool lastMotionWasRotationOnly = false;
+static float lastRotationOmegaDegS = 0;
+static int rotationBrakeFrames = 0;
+static int rotationBrakeDirection = 0;
+static bool suppressRotationBrake = false;
+static const float rampIncrement =
+    (1.0f - RAMP_START_FRACTION) / (RAMP_DURATION_MS / (float)CONTROL_LOOP_INTERVAL_MS);
+
+static void resetMotionControlState(bool suppressBrake) {
+    motorRampFactor = 0;
+    motorWasMoving = false;
+    lastMotionWasRotationOnly = false;
+    lastRotationOmegaDegS = 0;
+    rotationBrakeFrames = 0;
+    rotationBrakeDirection = 0;
+    suppressRotationBrake = suppressBrake;
+    rearmKickstart();
+}
+
 int sign(double x) {
     return (x > 0) - (x < 0);
 }
@@ -139,11 +160,6 @@ MecanumSpeeds computeMecanumSpeeds(double V, double H, double A) {
 // ============================================================================
 void applyMotors() {
     // Acceleration ramp state — persists across calls
-    static float rampFactor = 0;
-    static bool  wasMoving  = false;
-    static const float rampIncrement =
-        (1.0f - RAMP_START_FRACTION) / (RAMP_DURATION_MS / (float)CONTROL_LOOP_INTERVAL_MS);
-
     float vx, vy, omega;
     motionQueue.getCurrentVelocity(vx, vy, omega);
     currentVx = vx;
@@ -153,6 +169,30 @@ void applyMotors() {
     bool isMoving = (vx != 0 || vy != 0 || omega != 0);
     bool rotationOnly = (omega != 0 && vx == 0 && vy == 0);
 
+    if (!isMoving && motorWasMoving && lastMotionWasRotationOnly &&
+        !suppressRotationBrake && rotationBrakeFrames == 0 &&
+        fabsf(lastRotationOmegaDegS) >= ROTATION_BRAKE_MIN_OMEGA_DEG_S) {
+        rotationBrakeFrames = ROTATION_BRAKE_FRAMES;
+        rotationBrakeDirection = (lastRotationOmegaDegS > 0) ? 1 : -1;
+    }
+
+    if (!isMoving && rotationBrakeFrames > 0 && rotationBrakeDirection != 0) {
+        currentVx = 0;
+        currentVy = 0;
+        currentOmega = -rotationBrakeDirection * (SPEED_FAST_DEG_S * (ROTATION_BRAKE_DUTY / 100.0f));
+#ifndef TEST_MODE
+        Motor1.Run(-rotationBrakeDirection * ROTATION_BRAKE_DUTY);
+        Motor2.Run(-rotationBrakeDirection * ROTATION_BRAKE_DUTY);
+        Motor3.Run(rotationBrakeDirection * ROTATION_BRAKE_DUTY);
+        Motor4.Run(rotationBrakeDirection * ROTATION_BRAKE_DUTY);
+#endif
+        rotationBrakeFrames--;
+        if (rotationBrakeFrames == 0) {
+            resetMotionControlState(false);
+        }
+        return;
+    }
+
     if (!isMoving) {
         // No active segment — stop motors and reset ramp
 #ifndef TEST_MODE
@@ -161,19 +201,21 @@ void applyMotors() {
         Motor3.Stop();
         Motor4.Stop();
 #endif
-        rampFactor = 0;
-        wasMoving = false;
-        rearmKickstart();
+        resetMotionControlState(false);
         return;
     }
 
-    if (!wasMoving) {
-        rampFactor = RAMP_START_FRACTION;
-        wasMoving = true;
+    suppressRotationBrake = false;
+    rotationBrakeFrames = 0;
+    rotationBrakeDirection = 0;
+
+    if (!motorWasMoving) {
+        motorRampFactor = RAMP_START_FRACTION;
+        motorWasMoving = true;
         rearmKickstart();
-    } else if (rampFactor < 1.0f) {
-        rampFactor += rampIncrement;
-        if (rampFactor > 1.0f) rampFactor = 1.0f;
+    } else if (motorRampFactor < 1.0f) {
+        motorRampFactor += rampIncrement;
+        if (motorRampFactor > 1.0f) motorRampFactor = 1.0f;
     }
 
     const MotionSegment* seg = motionQueue.currentSegment();
@@ -189,14 +231,13 @@ void applyMotors() {
         H = (vx * sinA - vy * cosA) / SPEED_FAST_MM_S;
     }
 
-    V *= rampFactor;
-    H *= rampFactor;
+    V *= motorRampFactor;
+    H *= motorRampFactor;
 
     // Drift trim: pre-rotate (V, H) CCW by a speed-dependent angle to counteract
     // the measured systematic leftward bias in translation.
     // Motor1/2 are reversed, so positive H in the formula = leftward physical strafe.
     // To compensate leftward drift, we need negative H → CCW rotation of velocity.
-    // Low duty cycles amplify motor asymmetries → more drift at slow speed.
     {
         float trim_deg = 0;
         if (seg) {
@@ -232,7 +273,7 @@ void applyMotors() {
         // Active rotation segment — normalize omega by max physical rotation speed
         if (SPEED_FAST_DEG_S > 0.1f) {
             A = -omega / SPEED_FAST_DEG_S;  // invert: math CCW+ → mecanum CW+
-            A *= rotationOnly ? 1.0 : rampFactor;
+            A *= rotationOnly ? 1.0 : motorRampFactor;
         }
     } else {
         // Pure translation — actively counteract angular drift using
@@ -259,6 +300,9 @@ void applyMotors() {
     Motor3.Run(s.m3);
     Motor4.Run(s.m4);
 #endif
+
+    lastMotionWasRotationOnly = rotationOnly;
+    lastRotationOmegaDegS = omega;
 }
 
 // ============================================================================
@@ -548,7 +592,7 @@ void udpTask(void* parameter) {
                 motionQueue.abort();
                 currentVx = currentVy = currentOmega = 0;
                 xSemaphoreGive(stateMutex);
-                abortFlag = true;  // Core 1 stops motors immediately
+                abortFlag = true;  // Core 1 will stop motors immediately
                 continue;
             }
 
@@ -603,6 +647,7 @@ void loop() {
 #else
         Serial.println("[TEST MODE] Motors stopped (ABORT)");
 #endif
+        resetMotionControlState(true);
         return;
     }
 

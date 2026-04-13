@@ -96,6 +96,9 @@
 // Kickstart: briefly boost duty to overcome static friction
 #define KICKSTART_FRAMES        3
 #define KICKSTART_SPEED         70.0
+#define ROTATION_BRAKE_FRAMES   2
+#define ROTATION_BRAKE_DUTY     35
+#define ROTATION_BRAKE_MIN_OMEGA_DEG_S 70.0f
 
 // Acceleration ramp: gradually increase motor duty at segment start
 // to synchronize wheel engagement and reduce drift from motor timing mismatch.
