@@ -96,6 +96,7 @@ struct UdpMessage {
 
     // PING/PONG fields
     uint32_t ping_timestamp;
+    uint32_t remote_timestamp;  // used for clock sync during pong
 
     // REGISTER fields
     char robot_id[8];

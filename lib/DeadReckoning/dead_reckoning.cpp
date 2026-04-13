@@ -6,6 +6,7 @@
 
 DeadReckoning::DeadReckoning()
     : _x(0), _y(0), _angle(0),
+      _distFactorH(1.0f), _distFactorV(1.0f),
       _historyHead(0), _historyCount(0),
       _corrX(0), _corrY(0), _corrAngle(0),
       _corrTotalX(0), _corrTotalY(0), _corrTotalAngle(0),
@@ -13,6 +14,11 @@ DeadReckoning::DeadReckoning()
       _corrActive(false)
 {
     memset(_history, 0, sizeof(_history));
+}
+
+void DeadReckoning::setDistanceFactors(float factor_h, float factor_v) {
+    _distFactorH = factor_h;
+    _distFactorV = factor_v;
 }
 
 void DeadReckoning::reset(float x0, float y0, float angle0) {
@@ -35,8 +41,8 @@ void DeadReckoning::update(float vx_mm_s, float vy_mm_s, float omega_deg_s, uint
     if (dt_ms == 0) return;
 
     float dt_s = dt_ms / 1000.0f;
-    _x += vx_mm_s * dt_s;
-    _y += vy_mm_s * dt_s;
+    _x += (vx_mm_s * _distFactorH) * dt_s;
+    _y += (vy_mm_s * _distFactorV) * dt_s;
     _angle += omega_deg_s * dt_s;
 
     // Advance the smooth correction blend (decay remaining correction)

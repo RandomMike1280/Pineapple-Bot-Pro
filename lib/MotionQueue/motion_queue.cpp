@@ -2,12 +2,19 @@
 
 // ============================================================================
 // Construction
+
 // ============================================================================
 
 MotionQueue::MotionQueue()
     : _head(0), _tail(0), _count(0),
       _speedSlow(29.0f), _speedNormal(43.5f), _speedFast(72.5f),
       _rotSlow(34.56f), _rotNormal(51.84f), _rotFast(86.4f),
+      _distFactorH(1.0f), _distFactorV(1.0f),
+      _currentVx(0), _currentVy(0), _currentOmega(0),
+      _deccelDistMm(150.0f), _rotDeccelDeg(25.0f),
+      _minSpeedLimitMmS(25.0f), _minRotLimitDegS(25.0f),
+      _waypointToleranceMm(12.0f), _rotToleranceDeg(2.0f),
+      _rotStabilizationGain(1.5f), _maxStabilizationOmega(35.0f),
       segmentJustCompleted(false)
 {
 }
@@ -22,6 +29,25 @@ void MotionQueue::setRotationCalibration(float slow_deg_s, float normal_deg_s, f
     _rotSlow   = slow_deg_s;
     _rotNormal = normal_deg_s;
     _rotFast   = fast_deg_s;
+}
+
+void MotionQueue::setDistanceFactors(float factor_h, float factor_v) {
+    _distFactorH = factor_h;
+    _distFactorV = factor_v;
+}
+
+void MotionQueue::setPrecisionParameters(float deccel_dist_mm, float rot_deccel_deg, 
+                                          float min_speed_mm_s, float min_rot_deg_s,
+                                          float waypoint_tol_mm, float rot_tol_deg,
+                                          float rot_stab_gain, float max_stab_omega) {
+    _deccelDistMm = deccel_dist_mm;
+    _rotDeccelDeg = rot_deccel_deg;
+    _minSpeedLimitMmS = min_speed_mm_s;
+    _minRotLimitDegS = min_rot_deg_s;
+    _waypointToleranceMm = waypoint_tol_mm;
+    _rotToleranceDeg = rot_tol_deg;
+    _rotStabilizationGain = rot_stab_gain;
+    _maxStabilizationOmega = max_stab_omega;
 }
 
 float MotionQueue::_getSpeedMmS(SpeedLevel level) const {
@@ -311,10 +337,13 @@ bool MotionQueue::enqueue(MoveDirection direction, uint16_t distance_mm,
 // Tick — called every control-loop iteration
 // ============================================================================
 
-bool MotionQueue::tick(uint32_t dt_ms) {
+bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float current_angle) {
     segmentJustCompleted = false;
 
-    if (_count == 0) return false;
+    if (_count == 0) {
+        _currentVx = _currentVy = _currentOmega = 0;
+        return false;
+    }
 
     MotionSegment &seg = _segments[_head % MQ_MAX_SEGMENTS];
 
@@ -325,27 +354,151 @@ bool MotionQueue::tick(uint32_t dt_ms) {
         seg.elapsed_ms = 0;
     }
 
-    if (seg.state != SegmentState::ACTIVE) return false;
+    if (seg.state != SegmentState::ACTIVE && seg.state != SegmentState::HOLDING) {
+        _currentVx = _currentVy = _currentOmega = 0;
+        return false;
+    }
 
     // Integrate distance traveled
     float dt_s = dt_ms / 1000.0f;
-    float displacement = seg.speed_mm_s * dt_s;
+    
+    // Use current velocity for theoretical distance integration
+    float displacement = 0;
+    if (seg.speed_deg_s > 0 && seg.vx_mm_s == 0 && seg.vy_mm_s == 0) {
+        displacement = abs(_currentOmega) * dt_s;
+    } else {
+        float phys_vx = _currentVx * _distFactorH;
+        float phys_vy = _currentVy * _distFactorV;
+        displacement = sqrtf(phys_vx * phys_vx + phys_vy * phys_vy) * dt_s;
+    }
     seg.traveled_mm += displacement;
 
-    // Integrate elapsed time for duration-based segments
     if (seg.isDurationBased) {
         seg.elapsed_ms += dt_ms;
+        _currentVx = seg.vx_mm_s;
+        _currentVy = seg.vy_mm_s;
+        _currentOmega = seg.omega_deg_s;
+    } else {
+        // --- CLOSED LOOP DECELERATION & TARGETING ---
+        bool isRotationOnly = (seg.vx_mm_s == 0 && seg.vy_mm_s == 0 && seg.omega_deg_s != 0);
+        float speed_scale = 1.0f;
+
+        if (isRotationOnly) {
+            float angle_diff = seg.target_angle - current_angle;
+            while (angle_diff > 180.0f) angle_diff -= 360.0f;
+            while (angle_diff < -180.0f) angle_diff += 360.0f;
+            float abs_diff = abs(angle_diff);
+
+            // Calculate deceleration scale
+            if (abs_diff < _rotDeccelDeg) {
+                speed_scale = abs_diff / _rotDeccelDeg;
+                // Clamp to minimum speed to avoid stall
+                float min_scale = _minRotLimitDegS / seg.speed_deg_s;
+                if (speed_scale < min_scale) speed_scale = min_scale;
+            }
+
+            // Only decelerate if this is the last rotation or next isn't also a rotation
+            if (_count > 1) speed_scale = 1.0f; 
+
+            _currentVx = 0;
+            _currentVy = 0;
+            _currentOmega = (angle_diff > 0 ? seg.speed_deg_s : -seg.speed_deg_s) * speed_scale;
+        } else {
+            float dx = seg.target_x - current_x;
+            float dy = seg.target_y - current_y;
+            float dist_remaining = sqrtf(dx * dx + dy * dy);
+
+            // Calculate deceleration scale
+            if (dist_remaining < _deccelDistMm) {
+                speed_scale = dist_remaining / _deccelDistMm;
+                float min_scale = _minSpeedLimitMmS / seg.speed_mm_s;
+                if (speed_scale < min_scale) speed_scale = min_scale;
+            }
+
+            // Don't decelerate if another translation segment is waiting (seamless chaining)
+            if (_count > 1) {
+                const MotionSegment &next = _segments[(_head + 1) % MQ_MAX_SEGMENTS];
+                if (!next.isDurationBased && (next.vx_mm_s != 0 || next.vy_mm_s != 0)) {
+                    speed_scale = 1.0f;
+                }
+            }
+
+            _currentVx = (dx / dist_remaining) * seg.speed_mm_s * speed_scale;
+            _currentVy = (dy / dist_remaining) * seg.speed_mm_s * speed_scale;
+            
+            // --- Active Heading Stabilization ---
+            // Calculate error between actual heading and segment's target angle
+            float heading_err = seg.target_angle - current_angle;
+            while (heading_err > 180.0f) heading_err -= 360.0f;
+            while (heading_err < -180.0f) heading_err += 360.0f;
+
+            // Apply proportional stabilization
+            _currentOmega = heading_err * _rotStabilizationGain;
+
+            // Clamp stabilization power to prevent violent shakes
+            if (_currentOmega > _maxStabilizationOmega) _currentOmega = _maxStabilizationOmega;
+            if (_currentOmega < -_maxStabilizationOmega) _currentOmega = -_maxStabilizationOmega;
+        }
     }
 
-    // Check if segment is complete
-    bool done = seg.isDurationBased
-        ? (seg.elapsed_ms >= seg.duration_ms)
-        : (seg.traveled_mm >= (float)seg.distance_mm);
+    // --- CHECK COMPLETION ---
+    bool done = false;
+    if (seg.isDurationBased) {
+        done = (seg.elapsed_ms >= seg.duration_ms);
+    } else {
+        if (seg.vx_mm_s == 0 && seg.vy_mm_s == 0 && seg.omega_deg_s != 0) {
+            float angle_diff = current_angle - seg.target_angle;
+            while (angle_diff > 180.0f) angle_diff -= 360.0f;
+            while (angle_diff < -180.0f) angle_diff += 360.0f;
+            if (abs(angle_diff) <= _rotToleranceDeg) done = true;
+        } else {
+            float dx = seg.target_x - current_x;
+            float dy = seg.target_y - current_y;
+            float dist_remaining = sqrtf(dx * dx + dy * dy);
+            
+            // Reached boundary tolerance, or drifted past target
+            float dot_product = (dx * seg.vx_mm_s) + (dy * seg.vy_mm_s);
+            if (dist_remaining <= _waypointToleranceMm || dot_product < 0) done = true;
+        }
+    }
+
     if (done) {
-        seg.state = SegmentState::COMPLETED;
-        segmentJustCompleted = true;
-        _advanceToNext();
-        return (_count > 0);  // true if there's a next segment
+        if (seg.state == SegmentState::ACTIVE) {
+#if ENABLE_DEBUG_LOGGING
+            Serial.printf("[MQ Debug] Segment %d done. Final error: %.1f mm\n", _head % MQ_MAX_SEGMENTS, seg.traveled_mm);
+#endif
+            seg.state = SegmentState::COMPLETED;
+            segmentJustCompleted = true;
+
+            if (_count > 1) {
+                // Have more segments? Immediate advance.
+                _advanceToNext();
+                return true;
+            } else {
+                // Last segment? Switch to HOLDING to maintain position
+                seg.state = SegmentState::HOLDING;
+            }
+        }
+    }
+
+    // In HOLDING state, we already calculated _currentVx/Vy/Omega based on the error above.
+    // If we are within tolerance in HOLDING state, just stop motors.
+    if (seg.state == SegmentState::HOLDING) {
+        bool withinTol = false;
+        if (seg.vx_mm_s == 0 && seg.vy_mm_s == 0 && seg.omega_deg_s != 0) {
+            float angle_diff = current_angle - seg.target_angle;
+            while (angle_diff > 180.0f) angle_diff -= 360.0f;
+            while (angle_diff < -180.0f) angle_diff += 360.0f;
+            withinTol = (abs(angle_diff) <= _rotToleranceDeg);
+        } else {
+            float dx = seg.target_x - current_x;
+            float dy = seg.target_y - current_y;
+            withinTol = (sqrtf(dx * dx + dy * dy) <= _waypointToleranceMm);
+        }
+
+        if (withinTol) {
+            _currentVx = _currentVy = _currentOmega = 0;
+        }
     }
 
     return true;
@@ -368,22 +521,9 @@ void MotionQueue::_advanceToNext() {
 // ============================================================================
 
 void MotionQueue::getCurrentVelocity(float &vx_mm_s, float &vy_mm_s, float &omega_deg_s) const {
-    if (_count == 0) {
-        vx_mm_s = 0;
-        vy_mm_s = 0;
-        omega_deg_s = 0;
-        return;
-    }
-    const MotionSegment &seg = _segments[_head % MQ_MAX_SEGMENTS];
-    if (seg.state == SegmentState::ACTIVE) {
-        vx_mm_s = seg.vx_mm_s;
-        vy_mm_s = seg.vy_mm_s;
-        omega_deg_s = seg.omega_deg_s;
-    } else {
-        vx_mm_s = 0;
-        vy_mm_s = 0;
-        omega_deg_s = 0;
-    }
+    vx_mm_s = _currentVx;
+    vy_mm_s = _currentVy;
+    omega_deg_s = _currentOmega;
 }
 
 CorrectionPolicy MotionQueue::getActivePolicy() const {

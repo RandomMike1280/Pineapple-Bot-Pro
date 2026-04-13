@@ -17,6 +17,7 @@
 enum class SegmentState : uint8_t {
     PENDING,
     ACTIVE,
+    HOLDING,
     COMPLETED
 };
 
@@ -70,6 +71,15 @@ public:
     /// Set calibrated rotation speed constants (call once at startup)
     void setRotationCalibration(float slow_deg_s, float normal_deg_s, float fast_deg_s);
 
+    /// Set distance scaling factors for dead-reckoning mapping
+    void setDistanceFactors(float factor_h, float factor_v);
+
+    /// Set precision and deceleration parameters
+    void setPrecisionParameters(float deccel_dist_mm, float rot_deccel_deg, 
+                                float min_speed_mm_s, float min_rot_deg_s,
+                                float waypoint_tol_mm, float rot_tol_deg,
+                                float rot_stab_gain, float max_stab_omega);
+
     /// Enqueue a new motion segment.
     /// @param currentX, currentY, currentAngle current estimated position
     /// @returns true if enqueued, false if queue is full
@@ -105,7 +115,7 @@ public:
     /// Called every control-loop tick.  Returns true if there is an active
     /// segment being executed.
     /// @param dt_ms elapsed time since last call
-    bool tick(uint32_t dt_ms);
+    bool tick(uint32_t dt_ms, float current_x, float current_y, float current_angle);
 
     /// Get the current motion velocity to apply to motors.
     /// Returns (0, 0, 0) if no segment is active.
@@ -150,6 +160,25 @@ private:
     float _rotSlow;
     float _rotNormal;
     float _rotFast;
+
+    // Distance Calibration Scaling
+    float _distFactorH;
+    float _distFactorV;
+
+    // Active runtime state (filtered/decelerated)
+    float _currentVx;
+    float _currentVy;
+    float _currentOmega;
+
+    // Tuning Parameters (Injected from main.h)
+    float _deccelDistMm;
+    float _rotDeccelDeg;
+    float _minSpeedLimitMmS;
+    float _minRotLimitDegS;
+    float _waypointToleranceMm;
+    float _rotToleranceDeg;
+    float _rotStabilizationGain;
+    float _maxStabilizationOmega;
 
     float _getSpeedMmS(SpeedLevel level) const;
     float _getSpeedDegS(SpeedLevel level) const;

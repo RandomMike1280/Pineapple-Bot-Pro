@@ -32,7 +32,8 @@ public:
 
     /// Called when a PONG response arrives.
     /// @param originalSendTime  the timestamp from the original PING
-    void onPong(uint32_t originalSendTime);
+    /// @param remoteTimestamp   the timestamp from the phone when it replied (optional)
+    void onPong(uint32_t originalSendTime, uint32_t remoteTimestamp = 0);
 
     /// Get current estimated RTT in milliseconds
     uint32_t getRttMs() const;
@@ -45,6 +46,9 @@ public:
 
     /// Set drift thresholds
     void setThresholds(float driftThresholdMm, float emergencyThresholdMm);
+
+    /// Set camera processing latency offset
+    void setCameraLatency(uint32_t cameraLatencyMs);
 
 private:
     DeadReckoning* _dr;
@@ -65,6 +69,11 @@ private:
     // Thresholds
     float _driftThresholdMm;
     float _emergencyThresholdMm;
+    
+    // Latency / Clock Sync
+    uint32_t _cameraLatencyMs;
+    int64_t  _clockOffsetMs;
+    bool     _offsetInitialized;
 };
 
 #endif // LATENCY_COMPENSATOR_HPP

@@ -20,51 +20,71 @@
 #endif
 
 // ============================================================================
-// Speed Calibration (mm/s at each speed level)
+// TUNING PARAMETERS
 // ============================================================================
+// Global scaling factors for physical distances and speeds
+#define SPEED_SCALING_FACTOR     1.0f     // Global multiplier for all movement speeds
+#define ROTATION_SCALING_FACTOR  1.0f     // Specific multiplier for rotational speed
+#define DISTANCE_FACTOR_V        1.0f     // Calibrates dead-reckoning for Vertical (Forward/Backward)
+#define DISTANCE_FACTOR_H        1.0f     // Calibrates dead-reckoning for Horizontal (Strafe)
+
 // Measured from PS2 controller physics:
 //   Linear speed at max duty (100): ~72.5 mm/s (7.25 cm/s)
 //   Rotation at max duty (100): 86.4 deg/s (0.24 interval/sec)
-//   Both scale linearly with duty.
-//
-// Speed levels are duty-cycle percentages that map to physical speeds.
-#define SPEED_SLOW_MM_S    29.0f    // duty ~40 → 72.5 * 0.4
-#define SPEED_NORMAL_MM_S  43.5f    // duty ~60 → 72.5 * 0.6
-#define SPEED_FAST_MM_S    72.5f    // duty ~100 → 72.5 * 1.0
+#define SPEED_SLOW_MM_S    (29.0f * SPEED_SCALING_FACTOR)
+#define SPEED_NORMAL_MM_S  (43.5f * SPEED_SCALING_FACTOR)
+#define SPEED_FAST_MM_S    (72.5f * SPEED_SCALING_FACTOR)
 
 // Rotation speed calibration (deg/s at each speed level)
-#define SPEED_SLOW_DEG_S    15.0f    // reduced for fine camera-guided alignment
-#define SPEED_NORMAL_DEG_S  51.84f   // 86.4 * 0.6
-#define SPEED_FAST_DEG_S   86.4f     // 86.4 * 1.0
+#define SPEED_SLOW_DEG_S    (15.0f * SPEED_SCALING_FACTOR * ROTATION_SCALING_FACTOR)
+#define SPEED_NORMAL_DEG_S  (51.84f * SPEED_SCALING_FACTOR * ROTATION_SCALING_FACTOR)
+#define SPEED_FAST_DEG_S    (86.4f * SPEED_SCALING_FACTOR * ROTATION_SCALING_FACTOR)
 
 // ============================================================================
-// Motor Duty Cycle Mapping (speed level → motor duty %)
+// Diagnostics & Safety
 // ============================================================================
-// These are the raw duty values sent to Motor.Run() for each speed level.
-#define DUTY_SLOW     40
-#define DUTY_NORMAL   60
-#define DUTY_FAST     100
+#define ENABLE_DEBUG_LOGGING     0        // Set to 1 to enable detailed serial logs
+#define DRIVE_CLAMP_LOW          20       // Minimum duty to consider a motor "moving"
+#define DRIVE_CLAMP_HIGH         100      // Maximum allowable duty (safety cap)
+
+// Motor mapping constants
+#define MOTOR_MAP_SLOPE          43.0174f
+#define MOTOR_MAP_OFFSET         57.1650f
 
 // ============================================================================
 // Translation Drift Trim (speed-dependent)
 // ============================================================================
-// The mecanum wheels produce a systematic leftward bias during translation.
-// The bias is much stronger at low duty cycles where motor asymmetries dominate.
-// We pre-rotate the velocity vector CW by the appropriate angle to compensate.
-//
-// Slow:  measured 9.31°, 9.63°, 9.13° → avg 9.36°
-// Normal: significantly reduced (estimate ~2.5°, tune as needed)
-// Fast:   unknown, default 0 (tune after measurement)
-#define DRIFT_TRIM_SLOW_DEG    0.0f
-#define DRIFT_TRIM_NORMAL_DEG  0.0f
-#define DRIFT_TRIM_FAST_DEG    0.0f
+// Counteract the systematic leftward bias of the mecanum physics.
+#define DRIFT_TRIM_SLOW_DEG    9.36f
+#define DRIFT_TRIM_NORMAL_DEG  2.50f
+#define DRIFT_TRIM_FAST_DEG    0.00f
 
 // ============================================================================
-// Correction Thresholds
+// Latency / Correction Tuning
 // ============================================================================
+#define CAMERA_LATENCY_MS        150      // Default delay compensation for OpenCV/Network
 #define DRIFT_THRESHOLD_MM       20.0f    // apply full correction above this
 #define EMERGENCY_THRESHOLD_MM   50.0f    // decelerate + correct above this
 #define CORRECTION_BLEND_MS      200      // ms to blend corrections smoothly
+
+// ============================================================================
+// Precision & Deceleration
+// ============================================================================
+#define DECCEL_DISTANCE_MM       150.0f   // Start slowing down at this distance
+#define ROT_DECCEL_DEG           25.0f    // Start slowing down rotation at this angle
+#define MIN_SPEED_LIMIT_MM_S     25.0f    // Floor speed during deccel (prevent stall)
+#define MIN_ROT_LIMIT_DEG_S      25.0f    // Floor rotation during deccel
+#define WAYPOINT_TOLERANCE_MM    12.0f    // Tighten tolerance for arrival
+#define ROTATION_TOLERANCE_DEG   2.0f
+
+// ============================================================================
+// Active Heading Stabilization (Holonomic Control)
+// ============================================================================
+// These constants define how the robot corrects its heading while moving.
+// Increase the gain if the robot is "lazy" about correcting drift.
+// Decrease the gain if the robot "oscillates" or shakes while strafing.
+#define STABILIZATION_GAIN       1.5f     // Corrective OMEGA per degree of error
+#define MAX_STABILIZATION_OMEGA  35.0f    // Max deg/s allowed for in-move correction
 
 // ============================================================================
 // Timing Constants

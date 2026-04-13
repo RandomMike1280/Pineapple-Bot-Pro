@@ -8,10 +8,10 @@
 LatencyCompensator::LatencyCompensator()
     : _dr(nullptr), _mq(nullptr),
       _rttMs(100), _rttInitialized(false),
-      _lastDriftX(0), _lastDriftY(0), _lastDriftAngle(0), _lastDriftMagnitude(0),
-      _emergencyTriggered(false),
-      _driftThresholdMm(20.0f),
-      _emergencyThresholdMm(50.0f)
+      _lastDriftX(0), _lastDriftY(0), _lastDriftAngle(0),
+      _lastDriftMagnitude(0), _emergencyTriggered(false),
+      _driftThresholdMm(20.0f), _emergencyThresholdMm(120.0f),
+      _cameraLatencyMs(0), _clockOffsetMs(0), _offsetInitialized(false)
 {
 }
 
@@ -25,7 +25,12 @@ void LatencyCompensator::setThresholds(float driftThresholdMm, float emergencyTh
     _emergencyThresholdMm = emergencyThresholdMm;
 }
 
+void LatencyCompensator::setCameraLatency(uint32_t cameraLatencyMs) {
+    _cameraLatencyMs = cameraLatencyMs;
+}
+
 // ============================================================================
+
 // Camera observation processing — the core latency compensation logic
 // ============================================================================
 //
@@ -50,14 +55,19 @@ void LatencyCompensator::onCameraUpdate(uint32_t phoneTimestamp,
                                          float observedX, float observedY, float observedAngle,
                                          uint32_t correctionBlendMs) {
     if (_dr == nullptr || _mq == nullptr) return;
+    if (!_offsetInitialized) {
+        Serial.println("[LC] Clock not synchronized yet — skipping camera update");
+        return;
+    }
 
     _emergencyTriggered = false;
 
-    // Step 1: Estimate when the camera actually captured this frame
-    // Subtract half the round-trip time
-    uint32_t captureTime = phoneTimestamp - (_rttMs / 2);
+    // --- Absolute Time Synchronization ---
+    // The phone sent its absolute timestamp (phoneTimestamp) of the frame capture.
+    // We translate this to our local timeline using the calculated offset.
+    uint32_t captureTime = (uint32_t)((int64_t)phoneTimestamp + _clockOffsetMs);
 
-    // Step 2: Look up our estimated position at that time
+    // Step 2: Look up our estimated position at that exact past moment
     float estX, estY, estAngle;
     bool found = _dr->getPositionAt(captureTime, estX, estY, estAngle);
     if (!found) {
@@ -120,7 +130,7 @@ void LatencyCompensator::onCameraUpdate(uint32_t phoneTimestamp,
 // RTT tracking via PONG responses
 // ============================================================================
 
-void LatencyCompensator::onPong(uint32_t originalSendTime) {
+void LatencyCompensator::onPong(uint32_t originalSendTime, uint32_t remoteTimestamp) {
     uint32_t now = millis();
     uint32_t measuredRtt = now - originalSendTime;
 
@@ -128,9 +138,28 @@ void LatencyCompensator::onPong(uint32_t originalSendTime) {
         _rttMs = measuredRtt;
         _rttInitialized = true;
     } else {
-        // Exponential moving average:  rtt = (7/8)*old + (1/8)*new
-        // Using bit shifts for efficiency on ESP32
+        // EMA: average the Rtt over time to smooth out jitter
         _rttMs = _rttMs - (_rttMs >> RTT_EMA_ALPHA_SHIFT) + (measuredRtt >> RTT_EMA_ALPHA_SHIFT);
+    }
+
+    // --- NTP-style Clock Synchronization ---
+    if (remoteTimestamp != 0) {
+        // Estimated robot-local time when the phone sent the pong:
+        // Assume network delay is symmetric (RTT / 2)
+        uint32_t estimatedLocalTimeAtPong = originalSendTime + (measuredRtt / 2);
+        
+        // Offset = RobotTime - PhoneTime
+        int64_t sampleOffset = (int64_t)estimatedLocalTimeAtPong - (int64_t)remoteTimestamp;
+
+        if (!_offsetInitialized) {
+            _clockOffsetMs = sampleOffset;
+            _offsetInitialized = true;
+            Serial.printf("[LC] Clock Sync: Offset=%lld ms (Initial)\n", _clockOffsetMs);
+        } else {
+            // Apply gentle smoothing to the offset to prevent jumps
+            // Use same EMA shift for simplicity
+            _clockOffsetMs = _clockOffsetMs - (_clockOffsetMs >> RTT_EMA_ALPHA_SHIFT) + (sampleOffset >> RTT_EMA_ALPHA_SHIFT);
+        }
     }
 }
 

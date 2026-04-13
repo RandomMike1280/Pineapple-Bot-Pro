@@ -45,6 +45,13 @@ uint32_t lastStatusTime = 0;
 uint32_t lastPingTime   = 0;
 
 // ============================================================================
+// Latency / Correction Tuning
+// ============================================================================
+// CAMERA_LATENCY_MS is now DEPRECATED. The robot now uses a "Time-Ago" 
+// mechanism where the phone explicitly reports its OpenCV processing delay.
+#define DRIFT_THRESHOLD_MM       20.0f    // apply full correction above this
+
+// ============================================================================
 // Dual-core synchronization
 // ============================================================================
 SemaphoreHandle_t stateMutex;                // protects motionQueue, deadReckoning, latencyComp
@@ -101,9 +108,9 @@ int sign(double x) {
 
 int speed_to_motor_duty(double speed) {
     if (speed > 0) {
-        return 43.0174134490 * speed + 57.16498038405947;
+        return MOTOR_MAP_SLOPE * speed + MOTOR_MAP_OFFSET;
     } else if (speed < 0) {
-        return 43.0174134490 * speed - 57.16498038405947;
+        return MOTOR_MAP_SLOPE * speed - MOTOR_MAP_OFFSET;
     }
     return 0;
 }
@@ -127,25 +134,27 @@ MecanumSpeeds computeMecanumSpeeds(double V, double H, double A) {
         }
     }
 
-    // Normalize duties to [-100, 100]
+    // Normalize duties to [-DRIVE_CLAMP_HIGH, DRIVE_CLAMP_HIGH]
     double maxDuty = 0;
     for (int i = 0; i < 4; i++) {
         maxDuty = max(maxDuty, abs(mspeedf[i]));
     }
-    if (maxDuty > 100) {
+    if (maxDuty > DRIVE_CLAMP_HIGH) {
         for (int i = 0; i < 4; i++) {
-            mspeedf[i] = mspeedf[i] / maxDuty * 100.0;
+            mspeedf[i] = mspeedf[i] / maxDuty * DRIVE_CLAMP_HIGH;
         }
     }
 
     // Kickstart: briefly boost duty to overcome static friction
     for (int i = 0; i < 4; i++) {
-        if (abs(mspeedf[i]) < MOTOR_STOP_THRESHOLD) {
+        if (abs(mspeedf[i]) < DRIVE_CLAMP_LOW && abs(mspeedf[i]) > 0) {
             mkickstart[i] = KICKSTART_FRAMES;
         }
-        if (mkickstart[i] > 0 && abs(mspeedf[i]) >= MOTOR_STOP_THRESHOLD) {
+        if (mkickstart[i] > 0) {
             mkickstart[i]--;
             mspeedf[i] = sign(mspeedf[i]) * max(KICKSTART_SPEED, abs(mspeedf[i]));
+        } else if (abs(mspeedf[i]) > 0) {
+            mspeedf[i] = sign(mspeedf[i]) * max((double)DRIVE_CLAMP_LOW, abs(mspeedf[i]));
         }
     }
 
@@ -195,16 +204,24 @@ void applyMotors() {
     }
 
     if (!isMoving) {
-        // No active segment — stop motors and reset ramp
-#ifndef TEST_MODE
+        // No active segment — stop motors and reset ramp after 50ms of inactivity
+        #ifndef TEST_MODE
         Motor1.Stop();
         Motor2.Stop();
         Motor3.Stop();
         Motor4.Stop();
-#endif
-        resetMotionControlState(false);
+        #endif
+        
+        static uint32_t stopStartTime = 0;
+        if (stopStartTime == 0) stopStartTime = millis();
+        if (millis() - stopStartTime > 50) {
+            resetMotionControlState(false);
+        }
         return;
     }
+    static uint32_t stopStartTime = 0; // reset local static
+    stopStartTime = 0;
+
 
     suppressRotationBrake = false;
     rotationBrakeFrames = 0;
@@ -287,6 +304,15 @@ void applyMotors() {
     }
 
     MecanumSpeeds s = computeMecanumSpeeds(V, H, A);
+
+#if ENABLE_DEBUG_LOGGING
+    static unsigned long lastDebugTime = 0;
+    if (millis() - lastDebugTime >= 100) {
+        Serial.printf("[Motor Debug] M1:%d M2:%d M3:%d M4:%d | Target: V:%.2f H:%.2f A:%.2f\n",
+            s.m1, s.m2, s.m3, s.m4, V, H, A);
+        lastDebugTime = millis();
+    }
+#endif
 
 #ifdef TEST_MODE
     static unsigned long lastPrintTime = 0;
@@ -407,18 +433,19 @@ void handleParsedMessage(const UdpMessage &msg) {
         }
 
         case MsgType::CAM: {
-            // Use ESP32's own millis() instead of the phone's epoch timestamp,
-            // since the two clocks aren't synchronized.
-            // onCameraUpdate() internally subtracts RTT/2 to estimate capture time.
+            // We are using absolute clock synchronization. The phone sends the 
+            // exact phone-clock timestamp of the frame capture. 
+            // the LatencyCompensator translates this to robot-time via the offset.
             latencyComp.onCameraUpdate(
-                millis(), msg.cam_x, msg.cam_y, msg.cam_angle,
+                msg.cam_timestamp, msg.cam_x, msg.cam_y, msg.cam_angle,
                 CORRECTION_BLEND_MS
             );
             break;
         }
 
         case MsgType::PING: {
-            // Respond immediately with PONG
+            // Respond immediately with PONG. 
+            // Note: The phone will include its own timestamp in its PONG reply to us.
             char pongBuf[32];
             int pongLen = buildPongMessage(pongBuf, sizeof(pongBuf), msg.ping_timestamp);
             udp.beginPacket(udp.remoteIP(), udpPort);
@@ -428,7 +455,8 @@ void handleParsedMessage(const UdpMessage &msg) {
         }
 
         case MsgType::PONG: {
-            latencyComp.onPong(msg.ping_timestamp);
+            // Include the remote (phone) timestamp to update our clock offset
+            latencyComp.onPong(msg.ping_timestamp, msg.remote_timestamp);
             Serial.printf("[RTT] %lu ms\n", (unsigned long)latencyComp.getRttMs());
             break;
         }
@@ -516,15 +544,22 @@ void setup() {
 
     // --- Initialize subsystems ---
     deadReckoning.reset(0, 0, 0);
+    deadReckoning.setDistanceFactors(DISTANCE_FACTOR_H, DISTANCE_FACTOR_V);
 
     Motor1.Reverse();
     Motor2.Reverse();
 
     motionQueue.setSpeedCalibration(SPEED_SLOW_MM_S, SPEED_NORMAL_MM_S, SPEED_FAST_MM_S);
     motionQueue.setRotationCalibration(SPEED_SLOW_DEG_S, SPEED_NORMAL_DEG_S, SPEED_FAST_DEG_S);
+    motionQueue.setDistanceFactors(DISTANCE_FACTOR_H, DISTANCE_FACTOR_V);
+    motionQueue.setPrecisionParameters(DECCEL_DISTANCE_MM, ROT_DECCEL_DEG, 
+                                       MIN_SPEED_LIMIT_MM_S, MIN_ROT_LIMIT_DEG_S,
+                                       WAYPOINT_TOLERANCE_MM, ROTATION_TOLERANCE_DEG,
+                                       STABILIZATION_GAIN, MAX_STABILIZATION_OMEGA);
 
     latencyComp.init(&deadReckoning, &motionQueue);
     latencyComp.setThresholds(DRIFT_THRESHOLD_MM, EMERGENCY_THRESHOLD_MM);
+    latencyComp.setCameraLatency(CAMERA_LATENCY_MS);
 
     // --- Send registration to phone ---
     char regBuf[80];
@@ -655,7 +690,9 @@ void loop() {
     xSemaphoreTake(stateMutex, portMAX_DELAY);
 
     // ---- Tick the motion queue ----
-    bool moving = motionQueue.tick(dt);
+    float current_x, current_y, current_angle;
+    deadReckoning.getCurrentPosition(current_x, current_y, current_angle);
+    bool moving = motionQueue.tick(dt, current_x, current_y, current_angle);
 
     // If a segment just completed with deferred correction, apply it now
     if (motionQueue.segmentJustCompleted) {
@@ -683,6 +720,7 @@ void loop() {
     applyMotors();
 
     // ---- Update dead-reckoning ----
+    // Use the same dt calculated at the top of the loop for consistency
     deadReckoning.update(currentVx, currentVy, currentOmega, dt);
 
     xSemaphoreGive(stateMutex);

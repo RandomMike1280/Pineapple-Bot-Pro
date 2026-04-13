@@ -27,6 +27,9 @@ class DeadReckoning {
 public:
     DeadReckoning();
 
+    /// Set distance scaling factors for dead-reckoning mapping
+    void setDistanceFactors(float factor_h, float factor_v);
+
     /// Reset position to a known origin
     void reset(float x0 = 0.0f, float y0 = 0.0f, float angle0 = 0.0f);
 
@@ -61,6 +64,10 @@ private:
     float _x;           // mm
     float _y;           // mm
     float _angle;       // deg
+
+    // --- Distance Calibration ---
+    float _distFactorH;
+    float _distFactorV;
 
     // --- History ring buffer ---
     PositionSnapshot _history[DR_HISTORY_SIZE];
