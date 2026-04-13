@@ -114,8 +114,8 @@ MecanumSpeeds computeMecanumSpeeds(double V, double H, double A) {
 
     // Mecanum formula for mirrored front/back motor layout
     // V uniform across all motors (translation), A differential left/right (rotation)
-    mspeedf[0] =  V + H - A;  // Front Right
-    mspeedf[1] =  V - H - A;  // Back Right
+    mspeedf[0] =  - V + H + A;  // Front Right
+    mspeedf[1] =  - V - H + A;  // Back Right
     mspeedf[3] =  V - H + A;  // Back Left
     mspeedf[2] =  V + H + A;  // Front Left
 
