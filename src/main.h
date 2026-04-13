@@ -33,7 +33,7 @@
 #define SPEED_FAST_MM_S    72.5f    // duty ~100 → 72.5 * 1.0
 
 // Rotation speed calibration (deg/s at each speed level)
-#define SPEED_SLOW_DEG_S    18.0f    // reduced for fine camera-guided alignment
+#define SPEED_SLOW_DEG_S    15.0f    // reduced for fine camera-guided alignment
 #define SPEED_NORMAL_DEG_S  51.84f   // 86.4 * 0.6
 #define SPEED_FAST_DEG_S   86.4f     // 86.4 * 1.0
 

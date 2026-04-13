@@ -66,7 +66,13 @@ float currentOmega = 0; // deg/s
 // ============================================================================
 
 // Kickstart state per motor
-static int mkickstart[4] = {KICKSTART_FRAMES};
+static int mkickstart[4] = {KICKSTART_FRAMES, KICKSTART_FRAMES, KICKSTART_FRAMES, KICKSTART_FRAMES};
+
+static void rearmKickstart() {
+    for (int i = 0; i < 4; i++) {
+        mkickstart[i] = KICKSTART_FRAMES;
+    }
+}
 
 int sign(double x) {
     return (x > 0) - (x < 0);
@@ -157,12 +163,14 @@ void applyMotors() {
 #endif
         rampFactor = 0;
         wasMoving = false;
+        rearmKickstart();
         return;
     }
 
     if (!wasMoving) {
         rampFactor = RAMP_START_FRACTION;
         wasMoving = true;
+        rearmKickstart();
     } else if (rampFactor < 1.0f) {
         rampFactor += rampIncrement;
         if (rampFactor > 1.0f) rampFactor = 1.0f;
