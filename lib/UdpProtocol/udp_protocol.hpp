@@ -4,15 +4,17 @@
 #include <Arduino.h>
 
 // ============================================================================
-// UDP Protocol — Structured message format for Robot ↔ Phone communication
+// UDP Protocol — Structured message format for Robot Phone communication
 // ============================================================================
 // All messages are short ASCII strings for easy debugging on serial monitor.
 // Format:  TYPE_CHAR:field1:field2:...
 //
 //   HELLO     H:<robot_id>
 //   MOVE      M:<dir>:<dist_mm>:<speed>:<policy>
+//   MOVE_DUR  D:<dir>:<duration_ms>:<speed>:<policy>
 //   WAYPOINT  W:<target_x>:<target_y>:<speed>:<policy>
 //   ROTATE    T:<target_angle_deg>:<speed>:<policy>
+//   ROT_DUR   O:<cw|ccw>:<duration_ms>:<speed>:<policy>
 //   CAM       C:<timestamp_ms>:<x_mm>:<y_mm>[:<angle_deg>]
 //   PING      P:<timestamp_ms>
 //   PONG      Q:<orig_timestamp_ms>
@@ -32,6 +34,8 @@ enum class MsgType : uint8_t {
     REGISTER,
     WAYPOINT,
     ROTATE,
+    MOVE_DURATION,
+    ROTATE_DURATION,
     UNKNOWN
 };
 
@@ -40,6 +44,12 @@ enum class MoveDirection : uint8_t {
     DOWN,
     LEFT,
     RIGHT,
+    INVALID
+};
+
+enum class RotationDirection : uint8_t {
+    CW = 0,
+    CCW,
     INVALID
 };
 
@@ -63,9 +73,13 @@ struct UdpMessage {
 
     // MOVE fields
     MoveDirection direction;
+    RotationDirection rotationDirection;
     uint16_t      distance_mm;
     SpeedLevel    speed;
     CorrectionPolicy correctionPolicy;
+
+    // MOVE_DURATION fields
+    uint32_t      duration_ms;
 
     // WAYPOINT fields
     float         target_x;
@@ -111,6 +125,7 @@ int buildRegisterMessage(char* buf, int maxLen,
 
 // --- Helpers ---
 MoveDirection   parseDirection(const char* str);
+RotationDirection parseRotationDirection(const char* str);
 SpeedLevel      parseSpeed(const char* str);
 CorrectionPolicy parsePolicy(const char* str);
 

@@ -29,6 +29,12 @@ MoveDirection parseDirection(const char* str) {
     return MoveDirection::INVALID;
 }
 
+RotationDirection parseRotationDirection(const char* str) {
+    if (strcmp(str, "cw") == 0 || strcmp(str, "CW") == 0) return RotationDirection::CW;
+    if (strcmp(str, "ccw") == 0 || strcmp(str, "CCW") == 0) return RotationDirection::CCW;
+    return RotationDirection::INVALID;
+}
+
 SpeedLevel parseSpeed(const char* str) {
     if (strcmp(str, "slow")   == 0 || strcmp(str, "S") == 0) return SpeedLevel::SLOW;
     if (strcmp(str, "normal") == 0 || strcmp(str, "N") == 0) return SpeedLevel::NORMAL;
@@ -140,6 +146,28 @@ bool parseUdpMessage(const char* buffer, int len, UdpMessage &out) {
             out.type = MsgType::PONG;
             out.ping_timestamp = (uint32_t)strtoul(tokens[1], NULL, 10);
             return true;
+
+        case 'D': // MOVE_DURATION — D:<dir>:<duration_ms>:<speed>:<policy>
+            if (numTokens < 5) return false;
+            out.type = MsgType::MOVE_DURATION;
+            out.direction       = parseDirection(tokens[1]);
+            out.duration_ms     = (uint32_t)strtoul(tokens[2], NULL, 10);
+            out.speed           = parseSpeed(tokens[3]);
+            out.correctionPolicy = parsePolicy(tokens[4]);
+            return (out.direction != MoveDirection::INVALID &&
+                    out.speed != SpeedLevel::INVALID &&
+                    out.correctionPolicy != CorrectionPolicy::INVALID);
+
+        case 'O': // ROTATE_DURATION — O:<cw|ccw>:<duration_ms>:<speed>:<policy>
+            if (numTokens < 5) return false;
+            out.type = MsgType::ROTATE_DURATION;
+            out.rotationDirection = parseRotationDirection(tokens[1]);
+            out.duration_ms     = (uint32_t)strtoul(tokens[2], NULL, 10);
+            out.speed           = parseSpeed(tokens[3]);
+            out.correctionPolicy = parsePolicy(tokens[4]);
+            return (out.rotationDirection != RotationDirection::INVALID &&
+                    out.speed != SpeedLevel::INVALID &&
+                    out.correctionPolicy != CorrectionPolicy::INVALID);
 
         case 'A': // ABORT
             out.type = MsgType::ABORT;

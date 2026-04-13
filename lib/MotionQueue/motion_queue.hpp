@@ -37,6 +37,12 @@ struct MotionSegment {
     float vy_mm_s;
     float omega_deg_s;   // angular velocity (deg/s)
     float speed_mm_s;    // scalar speed (mm/s)
+    float speed_deg_s;   // scalar rotation speed (deg/s) for rotation segments
+
+    // Duration-based move fields
+    bool           isDurationBased;  // true = complete after duration_ms, false = complete after distance_mm
+    uint32_t       duration_ms;      // target duration (ms) for duration-based moves
+    uint32_t       elapsed_ms;       // elapsed time (ms) for duration-based moves
 
     // Runtime state
     SegmentState state;
@@ -48,7 +54,8 @@ struct MotionSegment {
     MotionSegment() : direction(MoveDirection::INVALID), distance_mm(0),
                       speed(SpeedLevel::NORMAL), correctionPolicy(CorrectionPolicy::LIVE),
                       target_x(0), target_y(0), target_angle(0), start_x(0), start_y(0), start_angle(0),
-                      vx_mm_s(0), vy_mm_s(0), omega_deg_s(0), speed_mm_s(0),
+                      vx_mm_s(0), vy_mm_s(0), omega_deg_s(0), speed_mm_s(0), speed_deg_s(0),
+                      isDurationBased(false), duration_ms(0), elapsed_ms(0),
                       state(SegmentState::PENDING), traveled_mm(0),
                       deferred_correction_x(0), deferred_correction_y(0), deferred_correction_angle(0) {}
 };
@@ -59,6 +66,9 @@ public:
 
     /// Set calibrated speed constants (call once at startup)
     void setSpeedCalibration(float slow_mm_s, float normal_mm_s, float fast_mm_s);
+
+    /// Set calibrated rotation speed constants (call once at startup)
+    void setRotationCalibration(float slow_deg_s, float normal_deg_s, float fast_deg_s);
 
     /// Enqueue a new motion segment.
     /// @param currentX, currentY, currentAngle current estimated position
@@ -73,6 +83,18 @@ public:
     bool enqueueWaypoint(float target_x, float target_y,
                          SpeedLevel speed, CorrectionPolicy policy,
                          float currentX, float currentY, float currentAngle);
+
+    /// Enqueue a duration-based move segment (move for a fixed time).
+    /// @returns true if enqueued, false if queue is full
+    bool enqueueDuration(MoveDirection direction, uint32_t duration_ms,
+                         SpeedLevel speed, CorrectionPolicy policy,
+                         float currentX, float currentY, float currentAngle);
+
+    /// Enqueue a duration-based rotation segment (rotate for a fixed time).
+    /// @returns true if enqueued, false if queue is full
+    bool enqueueRotateDuration(RotationDirection direction, uint32_t duration_ms,
+                               SpeedLevel speed, CorrectionPolicy policy,
+                               float currentX, float currentY, float currentAngle);
 
     /// Enqueue a new rotation motion segment (absolute orientation).
     /// @returns true if enqueued, false if queue is full
@@ -124,7 +146,13 @@ private:
     float _speedNormal;
     float _speedFast;
 
+    // Rotation speed calibration
+    float _rotSlow;
+    float _rotNormal;
+    float _rotFast;
+
     float _getSpeedMmS(SpeedLevel level) const;
+    float _getSpeedDegS(SpeedLevel level) const;
     void  _advanceToNext();
 };
 

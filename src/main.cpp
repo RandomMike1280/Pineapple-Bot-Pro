@@ -14,7 +14,6 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include "main.h"
-#include "auto_discovery.h"
 #include <dead_reckoning.hpp>
 #include <motion_queue.hpp>
 #include <latency_compensator.hpp>
@@ -46,6 +45,16 @@ uint32_t lastStatusTime = 0;
 uint32_t lastPingTime   = 0;
 
 // ============================================================================
+// Dual-core synchronization
+// ============================================================================
+SemaphoreHandle_t stateMutex;                // protects motionQueue, deadReckoning, latencyComp
+volatile bool     abortFlag = false;         // set by Core 0, read by Core 1 for instant motor stop
+
+// Forward declarations for dual-core
+void udpTask(void* parameter);
+void handleParsedMessage(const UdpMessage &msg);
+
+// ============================================================================
 // Current motor velocities (for dead-reckoning integration)
 // ============================================================================
 float currentVx = 0;  // mm/s
@@ -53,71 +62,11 @@ float currentVy = 0;  // mm/s
 float currentOmega = 0; // deg/s
 
 // ============================================================================
-// Remote Control Definitions
+// PS2 physics-based motor control
 // ============================================================================
-JoyStickButton leftJoy;
-JoyStickButton rightJoy;
-DPadButton DPad;
-DPadButton lastDPad;
-geoPadButton GeoPad;
-geoPadButton lastGeoPad;
-shoulderButton Shoulder;
-shoulderButton lastShoulder;
 
-int mspeed[4]       = {0};
-double mspeedf[4]   = {0.};
-int mkickstart[4]   = {KICKSTART_FRAMES, KICKSTART_FRAMES, KICKSTART_FRAMES, KICKSTART_FRAMES};
-
-PS2X remote;
-
-// Servo thresholds
-#define GRABBA_ANGLE    45
-#define SLIDER_UP       40
-#define SLIDER_DOWN     87
-#define ARM_UP          0
-#define ARM_DOWN        70
-
-void getRemoteState(PS2X &remote) {
-    remote.read_gamepad();
-    leftJoy.pressed = remote.Button(PSB_L3);
-    leftJoy.X = remote.Analog(PSS_LX) - 128;
-    leftJoy.Y = 127 - remote.Analog(PSS_LY);
-    rightJoy.pressed = remote.Button(PSB_R3);
-    rightJoy.X = remote.Analog(PSS_RX) - 128;
-    rightJoy.Y = 127 - remote.Analog(PSS_RY);
-    
-    if (leftJoy.X > 0) leftJoy.X = map(leftJoy.X, 0, 127, 0, 100);
-    else leftJoy.X = map(leftJoy.X, -128, 0, -100, 0);
-    
-    if (leftJoy.Y > 0) leftJoy.Y = map(leftJoy.Y, 0, 127, 0, 100);
-    else leftJoy.Y = map(leftJoy.Y, -128, 0, -100, 0);
-    
-    if (rightJoy.X > 0) rightJoy.X = map(rightJoy.X, 0, 127, 0, 100);
-    else rightJoy.X = map(rightJoy.X, -128, 0, -100, 0);
-    
-    if (rightJoy.Y > 0) rightJoy.Y = map(rightJoy.Y, 0, 127, 0, 100);
-    else rightJoy.Y = map(rightJoy.Y, -128, 0, -100, 0);
-    
-    if (abs(rightJoy.X) < joyThres) rightJoy.X = 0;
-    if (abs(rightJoy.Y) < joyThres) rightJoy.Y = 0;
-    if (abs(leftJoy.X) < joyThres) leftJoy.X = 0;
-    if (abs(leftJoy.Y) < joyThres) leftJoy.Y = 0;
-    
-    DPad.up = remote.Button(PSB_PAD_UP);
-    DPad.down = remote.Button(PSB_PAD_DOWN);
-    DPad.left = remote.Button(PSB_PAD_LEFT);
-    DPad.right = remote.Button(PSB_PAD_RIGHT);
-    
-    GeoPad.triangle = remote.Button(PSB_TRIANGLE);
-    GeoPad.circle = remote.Button(PSB_CIRCLE);
-    GeoPad.cross = remote.Button(PSB_CROSS);
-    GeoPad.square = remote.Button(PSB_SQUARE);
-    
-    Shoulder.L1 = remote.Button(PSB_L1);
-    Shoulder.L2 = remote.Button(PSB_L2);
-    Shoulder.R1 = remote.Button(PSB_R1);
-    Shoulder.R2 = remote.Button(PSB_R2);
-}
+// Kickstart state per motor
+static int mkickstart[4] = {KICKSTART_FRAMES};
 
 int sign(double x) {
     return (x > 0) - (x < 0);
@@ -132,155 +81,182 @@ int speed_to_motor_duty(double speed) {
     return 0;
 }
 
-// ============================================================================
-// Hybrid applyMotors (Manual override & Physics modeling)
-// ============================================================================
-void applyMotors() {
-    float V = 0, H = 0, A = 0;
-    
-    float joy_V = verticalVelocity * vRate;
-    float joy_H = horizontalVelocity * hRate;
-    float joy_A = angularVelocity * angularRate;
-    
-    // Check manual override
-    if (abs(joy_V) > 0.01f || abs(joy_H) > 0.01f || abs(joy_A) > 0.01f) {
-        motionQueue.abort(); // Cancel autonomous path explicitly
-        V = joy_V;
-        H = joy_H;
-        A = joy_A;
-    } else {
-        // Autonomous execution
-        float vx, vy, omega;
-        motionQueue.getCurrentVelocity(vx, vy, omega);
-        
-        if (vx == 0 && vy == 0 && omega == 0) {
-            V = H = A = 0;
-        } else {
-            // Apply speed scaling base on level profile (SLOW/NORMAL/FAST relative to FAST max)
-            const MotionSegment* seg = motionQueue.currentSegment();
-            float speed_scale = seg ? (seg->speed_mm_s / SPEED_FAST_MM_S) : 0.0f;
-            
-            V = (vy / SPEED_FAST_MM_S) * speed_scale;
-            H = (vx / SPEED_FAST_MM_S) * speed_scale;
-            
-            // Normalize Rotation
-            if (omega != 0) {
-                // Invert Math CCW (+) to Mechanical CCW (-) for mecanums
-                A = -(omega / 86.4f) * speed_scale;
-            } else {
-                // Passive translation drift correction
-                float cx, cy, c_angle;
-                deadReckoning.getCurrentPosition(cx, cy, c_angle);
-                float target_angle = seg ? seg->target_angle : c_angle;
-                float angle_err = target_angle - c_angle;
-                while (angle_err > 180.0f) angle_err -= 360.0f;
-                while (angle_err < -180.0f) angle_err += 360.0f;
-                
-                float Kp_angle = 1.0f / 86.4f; // Scale proportional gain back to normalized A
-                A = -Kp_angle * angle_err;
-                if (A > 0.3f) A = 0.3f;
-                if (A < -0.3f) A = -0.3f; // Limit drift correction 
-            }
-        }
-    }
+MecanumSpeeds computeMecanumSpeeds(double V, double H, double A) {
+    MecanumSpeeds s;
+    double mspeedf[4];
 
-    if (V == 0 && H == 0 && A == 0) {
-        // Halt physical motion fully, allowing kickstarts to reset
-        for (int i = 0; i < 4; i++) mspeed[i] = 0;
-#ifndef TEST_MODE
-        Motor1.Stop();
-        Motor2.Stop();
-        Motor3.Stop();
-        Motor4.Stop();
-#endif
-        currentVx = currentVy = currentOmega = 0;
-        return;
-    }
+    // Mecanum formula for mirrored front/back motor layout
+    // V uniform across all motors (translation), A differential left/right (rotation)
+    mspeedf[0] =  V + H - A;  // Front Right
+    mspeedf[1] =  V - H - A;  // Back Right
+    mspeedf[3] =  V - H + A;  // Back Left
+    mspeedf[2] =  V + H + A;  // Front Left
 
-    // Kinematics matching Motor bindings [0=FR, 1=BR, 2=FL, 3=BL]
-    mspeedf[0] = static_cast<double>(V - H - A); // Motor 1 - Front Right
-    mspeedf[1] = static_cast<double>(V + H - A); // Motor 2 - Back Right
-    mspeedf[2] = static_cast<double>(V + H + A); // Motor 3 - Front Left
-    mspeedf[3] = static_cast<double>(V - H + A); // Motor 4 - Back Left
-    
-    // Scale fractions through physics lookup table
+    // Apply speed_to_motor_duty to compensate for motor dead zone
     for (int i = 0; i < 4; i++) {
-        if (abs(mspeedf[i]) > 0) { 
+        if (abs(mspeedf[i]) > 0) {
             mspeedf[i] = speed_to_motor_duty(mspeedf[i]);
         }
     }
 
-    // Safely Cap to [-100, 100] without distorting vectors mathematically
-    double maxSpeed = 0;
+    // Normalize duties to [-100, 100]
+    double maxDuty = 0;
     for (int i = 0; i < 4; i++) {
-        maxSpeed = max(maxSpeed, abs(mspeedf[i]));
+        maxDuty = max(maxDuty, abs(mspeedf[i]));
     }
-    if (maxSpeed > MAX_SPEED) {
+    if (maxDuty > 100) {
         for (int i = 0; i < 4; i++) {
-            mspeedf[i] = mspeedf[i] / maxSpeed * MAX_SPEED;
+            mspeedf[i] = mspeedf[i] / maxDuty * 100.0;
         }
     }
 
-    // Frame-based 70% Kickstart
+    // Kickstart: briefly boost duty to overcome static friction
     for (int i = 0; i < 4; i++) {
         if (abs(mspeedf[i]) < MOTOR_STOP_THRESHOLD) {
             mkickstart[i] = KICKSTART_FRAMES;
         }
         if (mkickstart[i] > 0 && abs(mspeedf[i]) >= MOTOR_STOP_THRESHOLD) {
             mkickstart[i]--;
-            mspeedf[i] = sign(mspeedf[i]) * max((double)KICKSTART_SPEED, abs(mspeedf[i]));
+            mspeedf[i] = sign(mspeedf[i]) * max(KICKSTART_SPEED, abs(mspeedf[i]));
         }
     }
 
-    for (int i = 0; i < 4; i++) {
-        mspeed[i] = static_cast<int>(mspeedf[i]);
+    s.m1 = (int)mspeedf[0];  // Front Right
+    s.m2 = (int)mspeedf[1];  // Back Right
+    s.m3 = (int)mspeedf[2];  // Back Left
+    s.m4 = (int)mspeedf[3];  // Front Left
+    return s;
+}
+
+// ============================================================================
+// Apply motor speeds from current motion queue state
+// ============================================================================
+void applyMotors() {
+    // Acceleration ramp state — persists across calls
+    static float rampFactor = 0;
+    static bool  wasMoving  = false;
+    static const float rampIncrement =
+        (1.0f - RAMP_START_FRACTION) / (RAMP_DURATION_MS / (float)CONTROL_LOOP_INTERVAL_MS);
+
+    float vx, vy, omega;
+    motionQueue.getCurrentVelocity(vx, vy, omega);
+    currentVx = vx;
+    currentVy = vy;
+    currentOmega = omega;
+
+    bool isMoving = (vx != 0 || vy != 0 || omega != 0);
+    bool rotationOnly = (omega != 0 && vx == 0 && vy == 0);
+
+    if (!isMoving) {
+        // No active segment — stop motors and reset ramp
+#ifndef TEST_MODE
+        Motor1.Stop();
+        Motor2.Stop();
+        Motor3.Stop();
+        Motor4.Stop();
+#endif
+        rampFactor = 0;
+        wasMoving = false;
+        return;
     }
 
-    // Plumb physical approximation back to dead-reckoning engine:
-    currentVx = H * SPEED_FAST_MM_S;
-    currentVy = V * SPEED_FAST_MM_S;
-    currentOmega = -A * 86.4f;
+    if (!wasMoving) {
+        rampFactor = RAMP_START_FRACTION;
+        wasMoving = true;
+    } else if (rampFactor < 1.0f) {
+        rampFactor += rampIncrement;
+        if (rampFactor > 1.0f) rampFactor = 1.0f;
+    }
+
+    const MotionSegment* seg = motionQueue.currentSegment();
+    float cx, cy, c_angle;
+    deadReckoning.getCurrentPosition(cx, cy, c_angle);
+
+    double V = 0, H = 0;
+    if (SPEED_FAST_MM_S > 0.1f) {
+        double headingRad = c_angle * (PI / 180.0f);
+        double cosA = cos(headingRad);
+        double sinA = sin(headingRad);
+        V = (vx * cosA + vy * sinA) / SPEED_FAST_MM_S;
+        H = (vx * sinA - vy * cosA) / SPEED_FAST_MM_S;
+    }
+
+    V *= rampFactor;
+    H *= rampFactor;
+
+    // Drift trim: pre-rotate (V, H) CCW by a speed-dependent angle to counteract
+    // the measured systematic leftward bias in translation.
+    // Motor1/2 are reversed, so positive H in the formula = leftward physical strafe.
+    // To compensate leftward drift, we need negative H → CCW rotation of velocity.
+    // Low duty cycles amplify motor asymmetries → more drift at slow speed.
+    {
+        float trim_deg = 0;
+        if (seg) {
+            switch (seg->speed) {
+                case SpeedLevel::SLOW:   trim_deg = DRIFT_TRIM_SLOW_DEG;   break;
+                case SpeedLevel::NORMAL: trim_deg = DRIFT_TRIM_NORMAL_DEG; break;
+                case SpeedLevel::FAST:   trim_deg = DRIFT_TRIM_FAST_DEG;   break;
+                default: break;
+            }
+        }
+        if (trim_deg != 0) {
+            float trim_rad = trim_deg * (PI / 180.0f);
+            float cosT = cosf(trim_rad);
+            float sinT = sinf(trim_rad);
+            // CCW rotation in (H, V) plane:
+            //   H' = H*cos - V*sin   (adds negative H for forward V → rightward physical)
+            //   V' = H*sin + V*cos
+            double H2 = H * cosT - V * sinT;
+            double V2 = H * sinT + V * cosT;
+            V = V2;
+            H = H2;
+        }
+    }
+
+    float target_angle = seg ? seg->target_angle : c_angle;
+
+    float angle_err = target_angle - c_angle;
+    while (angle_err > 180.0f) angle_err -= 360.0f;
+    while (angle_err < -180.0f) angle_err += 360.0f;
+
+    double A = 0;
+    if (omega != 0) {
+        // Active rotation segment — normalize omega by max physical rotation speed
+        if (SPEED_FAST_DEG_S > 0.1f) {
+            A = -omega / SPEED_FAST_DEG_S;  // invert: math CCW+ → mecanum CW+
+            A *= rotationOnly ? 1.0 : rampFactor;
+        }
+    } else {
+        // Pure translation — actively counteract angular drift using
+        // dead-reckoning angle error (which includes camera corrections).
+        // At 9° error: A = 0.03 * 9 = 0.27 → strong but sub-clamp correction.
+        double Kp_angle = 0.03;
+        A = -Kp_angle * angle_err;
+        if (A > 0.3) A = 0.3;
+        if (A < -0.3) A = -0.3;
+    }
+
+    MecanumSpeeds s = computeMecanumSpeeds(V, H, A);
 
 #ifdef TEST_MODE
     static unsigned long lastPrintTime = 0;
     if (millis() - lastPrintTime >= 500) {
-        Serial.printf("[TEST MODE] Virtual Motors: M1=%d, M2=%d, M3=%d, M4=%d\n", mspeed[0], mspeed[1], mspeed[2], mspeed[3]);
+        Serial.printf("[TEST MODE] Virtual Motors: M1=%d, M2=%d, M3=%d, M4=%d  V=%.2f H=%.2f A=%.2f\n",
+            s.m1, s.m2, s.m3, s.m4, V, H, A);
         lastPrintTime = millis();
     }
 #else
-    Motor1.Run(mspeed[0]);
-    Motor2.Run(mspeed[1]);
-    Motor3.Run(mspeed[2]);
-    Motor4.Run(mspeed[3]);
+    Motor1.Run(s.m1);
+    Motor2.Run(s.m2);
+    Motor3.Run(s.m3);
+    Motor4.Run(s.m4);
 #endif
 }
 
 // ============================================================================
-// Handle incoming UDP messages
+// Process a pre-parsed UDP message (called from Core 0 under mutex)
 // ============================================================================
-void handleIncomingUdp() {
-    int packetSize = udp.parsePacket();
-    if (!packetSize) return;
-
-    // Automatically latch the phone's IP since the phone controls the robot.
-    // This allows the robot to send PONGs and status back without hardcoding the IP.
-    phoneIP = udp.remoteIP();
-
-    char buffer[256];
-    int len = udp.read(buffer, sizeof(buffer) - 1);
-    if (len <= 0) return;
-    buffer[len] = '\0';
-
-#ifdef TEST_MODE
-    Serial.printf("[TEST MODE] Received UDP Packet: %s\n", buffer);
-#endif
-
-    UdpMessage msg;
-    if (!parseUdpMessage(buffer, len, msg)) {
-        Serial.printf("[UDP] Failed to parse: %s\n", buffer);
-        return;
-    }
-
+void handleParsedMessage(const UdpMessage &msg) {
     switch (msg.type) {
         case MsgType::MOVE: {
             // Get current estimated position for segment target computation
@@ -298,6 +274,44 @@ void handleIncomingUdp() {
                     (int)msg.correctionPolicy, motionQueue.remaining());
             } else {
                 Serial.println("[CMD] MOVE rejected — queue full!");
+            }
+            break;
+        }
+
+        case MsgType::MOVE_DURATION: {
+            float cx, cy, c_angle;
+            deadReckoning.getCurrentPosition(cx, cy, c_angle);
+
+            bool ok = motionQueue.enqueueDuration(
+                msg.direction, msg.duration_ms,
+                msg.speed, msg.correctionPolicy,
+                cx, cy, c_angle
+            );
+            if (ok) {
+                Serial.printf("[CMD] MOVE_DUR queued: dir=%d dur=%lums spd=%d policy=%d (queue=%d)\n",
+                    (int)msg.direction, (unsigned long)msg.duration_ms, (int)msg.speed,
+                    (int)msg.correctionPolicy, motionQueue.remaining());
+            } else {
+                Serial.println("[CMD] MOVE_DUR rejected — queue full!");
+            }
+            break;
+        }
+
+        case MsgType::ROTATE_DURATION: {
+            float cx, cy, c_angle;
+            deadReckoning.getCurrentPosition(cx, cy, c_angle);
+
+            bool ok = motionQueue.enqueueRotateDuration(
+                msg.rotationDirection, msg.duration_ms,
+                msg.speed, msg.correctionPolicy,
+                cx, cy, c_angle
+            );
+            if (ok) {
+                Serial.printf("[CMD] ROT_DUR queued: dir=%d dur=%lums spd=%d policy=%d (queue=%d)\n",
+                    (int)msg.rotationDirection, (unsigned long)msg.duration_ms, (int)msg.speed,
+                    (int)msg.correctionPolicy, motionQueue.remaining());
+            } else {
+                Serial.println("[CMD] ROT_DUR rejected — queue full!");
             }
             break;
         }
@@ -340,8 +354,11 @@ void handleIncomingUdp() {
         }
 
         case MsgType::CAM: {
+            // Use ESP32's own millis() instead of the phone's epoch timestamp,
+            // since the two clocks aren't synchronized.
+            // onCameraUpdate() internally subtracts RTT/2 to estimate capture time.
             latencyComp.onCameraUpdate(
-                msg.cam_timestamp, msg.cam_x, msg.cam_y, msg.cam_angle,
+                millis(), msg.cam_x, msg.cam_y, msg.cam_angle,
                 CORRECTION_BLEND_MS
             );
             break;
@@ -366,13 +383,8 @@ void handleIncomingUdp() {
         case MsgType::ABORT: {
             Serial.println("[CMD] ABORT — emergency stop!");
             motionQueue.abort();
-#ifndef TEST_MODE
-            Motor1.Stop();
-            Motor2.Stop();
-            Motor3.Stop();
-            Motor4.Stop();
-#endif
             currentVx = currentVy = currentOmega = 0;
+            abortFlag = true;   // Core 1 will stop motors immediately
             break;
         }
 
@@ -401,7 +413,16 @@ void sendStatus() {
     udp.endPacket();
 }
 
-// Auto-discovery is now handled by auto_discovery.cpp
+// ============================================================================
+// Send HELLO beacon for auto-discovery (every HELLO_INTERVAL_MS)
+// ============================================================================
+void sendHello() {
+    char buf[64];
+    int len = snprintf(buf, sizeof(buf), "H:%s:%s", BOT_ID, WiFi.localIP().toString().c_str());
+    udp.beginPacket(phoneIP, udpPort);
+    udp.write((uint8_t*)buf, len);
+    udp.endPacket();
+}
 
 // ============================================================================
 // Send PING for RTT measurement (every PING_INTERVAL_MS)
@@ -418,7 +439,7 @@ void sendPing() {
 // SETUP
 // ============================================================================
 void setup() {
-    Serial.begin(921600);
+    Serial.begin(115200);
     delay(1000);
 
     Serial.println("\n========================================");
@@ -434,20 +455,8 @@ void setup() {
         Serial.print(".");
     }
     Serial.println("\nConnected!");
-    
-    // Ensure we actually got an IP assigned before continuing
-    while (WiFi.localIP()[0] == 0) {
-        delay(100);
-    }
-    
     Serial.printf("  Robot IP:  %s\n", WiFi.localIP().toString().c_str());
     phoneIP = WiFi.gatewayIP();
-    
-    // Ensure Gateway IP is valid
-    while (phoneIP[0] == 0) {
-        delay(100);
-        phoneIP = WiFi.gatewayIP();
-    }
     Serial.printf("  Phone IP:  %s\n", phoneIP.toString().c_str());
 
     udp.begin(udpPort);
@@ -457,34 +466,19 @@ void setup() {
 
     Motor1.Reverse();
     Motor2.Reverse();
-    
-    // Initialize Manual control connection
-    byte error = remote.config_gamepad(PS2_CLK, PS2_CMD, PS2_CS, PS2_DAT);
-    if (error) {
-        ledcSetup(7, 10, 12); // Channel 7, 10 kHz, 12-bit resolution
-        ledcAttachPin(LED, 7);
-        ledcWrite(7, 2048); // Turn on LED to indicate error
-        
-        unsigned long failInit = millis();
-        while (error) {
-            error = remote.config_gamepad(PS2_CLK, PS2_CMD, PS2_CS, PS2_DAT);
-            if (millis() - failInit > 3000) break; // Bypass if 3 seconds past, allowing UDP to live
-        }
-        ledcWrite(7, 0); // Turn off LED
-        ledcDetachPin(LED);
-    }
-    
-    servo1.write(GRABBA_ANGLE);
-    servo2.write(SLIDER_DOWN);
-    servo3.write(ARM_UP);
 
     motionQueue.setSpeedCalibration(SPEED_SLOW_MM_S, SPEED_NORMAL_MM_S, SPEED_FAST_MM_S);
+    motionQueue.setRotationCalibration(SPEED_SLOW_DEG_S, SPEED_NORMAL_DEG_S, SPEED_FAST_DEG_S);
 
     latencyComp.init(&deadReckoning, &motionQueue);
     latencyComp.setThresholds(DRIFT_THRESHOLD_MM, EMERGENCY_THRESHOLD_MM);
 
-    // --- Start auto-discovery broadcast ---
-    setupAutoDiscovery(udp, udpPort, BOT_ID);
+    // --- Send registration to phone ---
+    char regBuf[80];
+    int regLen = snprintf(regBuf, sizeof(regBuf), "R:%s:mecanum4wd:%s", BOT_ID, WiFi.localIP().toString().c_str());
+    udp.beginPacket(phoneIP, udpPort);
+    udp.write((uint8_t*)regBuf, regLen);
+    udp.endPacket();
 
 #ifdef TEST_MODE
     Serial.println("\n*** TEST MODE ENABLED ***");
@@ -493,12 +487,94 @@ void setup() {
     ledcAttachPin(LED, 7);
 #endif
 
+    // --- Dual-core: create mutex and start UDP task on Core 0 ---
+    stateMutex = xSemaphoreCreateMutex();
+    xTaskCreatePinnedToCore(
+        udpTask,      // function
+        "UDPTask",    // name
+        8192,         // stack size (bytes)
+        NULL,         // parameter
+        2,            // priority (above idle, below WiFi events)
+        NULL,         // task handle
+        0             // Core 0
+    );
+
     Serial.println("\nReady. Waiting for commands...\n");
+    Serial.println("  Core 0: UDP processing");
+    Serial.println("  Core 1: Motor control + dead reckoning");
     lastTick = millis();
 }
 
 // ============================================================================
-// MAIN LOOP
+// CORE 0 TASK — UDP processing (commands, camera, broadcasts)
+// ============================================================================
+void udpTask(void* parameter) {
+    (void)parameter;
+    Serial.println("[Core 0] UDP task started");
+
+    while (true) {
+        // --- Process all waiting UDP packets ---
+        for (int i = 0; i < 10; i++) {
+            int packetSize = udp.parsePacket();
+            if (!packetSize) break;
+
+            char buffer[256];
+            int len = udp.read(buffer, sizeof(buffer) - 1);
+            if (len <= 0) continue;
+            buffer[len] = '\0';
+
+#ifdef TEST_MODE
+            Serial.printf("[TEST MODE] Received UDP Packet: %s\n", buffer);
+#endif
+
+            UdpMessage msg;
+            if (!parseUdpMessage(buffer, len, msg)) {
+                Serial.printf("[UDP] Failed to parse: %s\n", buffer);
+                continue;
+            }
+
+            // ABORT is processed without waiting for mutex — instant response
+            if (msg.type == MsgType::ABORT) {
+                Serial.println("[CMD] ABORT — emergency stop!");
+                xSemaphoreTake(stateMutex, portMAX_DELAY);
+                motionQueue.abort();
+                currentVx = currentVy = currentOmega = 0;
+                xSemaphoreGive(stateMutex);
+                abortFlag = true;  // Core 1 stops motors immediately
+                continue;
+            }
+
+            // All other messages need mutex for shared state
+            xSemaphoreTake(stateMutex, portMAX_DELAY);
+            handleParsedMessage(msg);
+            xSemaphoreGive(stateMutex);
+        }
+
+        // --- Periodic broadcasts ---
+        uint32_t now = millis();
+        if (now - lastStatusTime >= STATUS_INTERVAL_MS) {
+            xSemaphoreTake(stateMutex, portMAX_DELAY);
+            sendStatus();
+            xSemaphoreGive(stateMutex);
+            lastStatusTime = now;
+        }
+
+        if (now - lastHelloTime >= HELLO_INTERVAL_MS) {
+            sendHello();
+            lastHelloTime = now;
+        }
+
+        if (now - lastPingTime >= PING_INTERVAL_MS) {
+            sendPing();
+            lastPingTime = now;
+        }
+
+        vTaskDelay(1);  // yield to WiFi stack (~1ms tick)
+    }
+}
+
+// ============================================================================
+// MAIN LOOP — Core 1: motor control + dead reckoning
 // ============================================================================
 void loop() {
     uint32_t now = millis();
@@ -508,29 +584,27 @@ void loop() {
     if (dt < CONTROL_LOOP_INTERVAL_MS) return;
     lastTick = now;
 
-    // ---- 1. Handle incoming UDP messages ----
-    // Process all available packets this tick
-    for (int i = 0; i < 5; i++) {
-        handleIncomingUdp();
+    // ---- Check abort flag (set by Core 0 for instant stop) ----
+    if (abortFlag) {
+        abortFlag = false;
+#ifndef TEST_MODE
+        Motor1.Stop();
+        Motor2.Stop();
+        Motor3.Stop();
+        Motor4.Stop();
+#else
+        Serial.println("[TEST MODE] Motors stopped (ABORT)");
+#endif
+        return;
     }
 
-    // ---- 2. Handle Joystick Servos ----
-    getRemoteState(remote);
-    
-    if (pressedButton(DPad.left, lastDPad.left)) servo1.write(GRABBA_ANGLE * 2);
-    if (pressedButton(DPad.right, lastDPad.right)) servo1.write(0);
-    if (pressedButton(GeoPad.triangle, lastGeoPad.triangle)) servo1.write(GRABBA_ANGLE);
-    
-    if (pressedButton(Shoulder.L1, lastShoulder.L1)) servo2.write(SLIDER_UP);
-    if (pressedButton(Shoulder.L2, lastShoulder.L2)) servo2.write(SLIDER_DOWN);
-    if (pressedButton(Shoulder.R1, lastShoulder.R1)) servo3.write(ARM_DOWN);
-    if (pressedButton(Shoulder.R2, lastShoulder.R2)) servo3.write(ARM_UP);
-    
-    // ---- 3. Tick the motion queue ----
+    xSemaphoreTake(stateMutex, portMAX_DELAY);
+
+    // ---- Tick the motion queue ----
     bool moving = motionQueue.tick(dt);
 
+    // If a segment just completed with deferred correction, apply it now
     if (motionQueue.segmentJustCompleted) {
-        CorrectionPolicy prevPolicy = motionQueue.getActivePolicy();
         float errX, errY, errAngle;
         motionQueue.getDeferredCorrection(errX, errY, errAngle);
         float errMag = sqrtf(errX * errX + errY * errY);
@@ -540,49 +614,28 @@ void loop() {
         }
     }
 
-    // ---- 4. Handle emergency deceleration ----
+    // ---- Handle emergency deceleration ----
     if (latencyComp.wasEmergencyTriggered() && moving) {
 #ifndef TEST_MODE
         Motor1.Stop();
         Motor2.Stop();
         Motor3.Stop();
         Motor4.Stop();
-#else
-        Serial.println("[TEST MODE] Virtual emergency stop pause");
 #endif
         delay(50);
     }
 
-    // ---- 5. Apply motor speeds (Hybrid loop) ----
+    // ---- Apply motor speeds ----
     applyMotors();
-    
-    // Cache controller state for next frame
-    leftJoy.lastPressed = leftJoy.pressed;
-    rightJoy.lastPressed = rightJoy.pressed;
-    lastDPad = DPad;
-    lastGeoPad = GeoPad;
-    lastShoulder = Shoulder;
 
-    // ---- 6. Update dead-reckoning ----
+    // ---- Update dead-reckoning ----
     deadReckoning.update(currentVx, currentVy, currentOmega, dt);
 
-    // ---- 6. Periodic broadcasts ----
-    if (now - lastStatusTime >= STATUS_INTERVAL_MS) {
-        sendStatus();
-        lastStatusTime = now;
-    }
-
-    tickAutoDiscovery(udp, udpPort, BOT_ID);
-
-    if (now - lastPingTime >= PING_INTERVAL_MS) {
-        sendPing();
-        lastPingTime = now;
-    }
+    xSemaphoreGive(stateMutex);
 
 #ifdef TEST_MODE
     static uint32_t lastLedBlinkTime = 0;
     static bool ledState = false;
-    // Blink LED every 500ms
     if (now - lastLedBlinkTime >= 500) {
         lastLedBlinkTime = now;
         ledState = !ledState;

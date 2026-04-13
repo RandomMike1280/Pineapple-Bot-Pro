@@ -159,21 +159,20 @@ class RobotCoordinator {
     }
 
     private fun handleIncoming(message: String, senderIp: String) {
-        // Intercept new broadcast message type
-        val helloPrefix = "hello, i am robot id "
-        if (message.startsWith(helloPrefix)) {
-            val id = message.substring(helloPrefix.length).trim()
-            onRobotDiscovered(id, senderIp)
-            return
-        }
-
         val parts = message.split(":")
         if (parts.isEmpty()) return
 
         when (parts[0]) {
-            "H" -> onRobotDiscovered(if (parts.size >= 2) parts[1] else "A", senderIp)
+            "H" -> {
+                val id = if (parts.size >= 2) parts[1] else "A"
+                val ip = if (parts.size >= 3) parts[2] else senderIp
+                onRobotDiscovered(id, ip.ifBlank { senderIp })
+            }
             "R" -> {
-                if (parts.size >= 2) onRobotDiscovered(parts[1], senderIp)
+                val id = if (parts.size >= 2) parts[1] else "A"
+                // R:<id>:<caps>:<ip> — IP is the last field
+                val ip = if (parts.size >= 4) parts[3] else senderIp
+                onRobotDiscovered(id, ip.ifBlank { senderIp })
             }
             "S" -> {
                 if (parts.size >= 5) {
@@ -187,25 +186,25 @@ class RobotCoordinator {
                 if (parts.size >= 2) parts[1].toLongOrNull()?.let { onPongReceived(senderIp, it) }
             }
             else -> {
-                if (message.startsWith("ESP32_HELLO")) onRobotDiscovered("0", senderIp)
+                if (message.startsWith("ESP32_HELLO")) onRobotDiscovered("A", senderIp)
             }
         }
     }
 
     private fun onRobotDiscovered(robotId: String, ip: String) {
         when (robotId) {
-            "A", "0" -> {
+            "A" -> {
                 val state = robotA.value
                 if (!state.connected || state.ip != ip) {
-                    robotA.value = state.copy(id = "0", ip = ip, connected = true)
-                    log("Robot 0 connected at $ip")
+                    robotA.value = state.copy(ip = ip, connected = true)
+                    log("Robot A connected at $ip")
                 }
             }
-            "B", "1" -> {
+            "B" -> {
                 val state = robotB.value
                 if (!state.connected || state.ip != ip) {
-                    robotB.value = state.copy(id = "1", ip = ip, connected = true)
-                    log("Robot 1 connected at $ip")
+                    robotB.value = state.copy(ip = ip, connected = true)
+                    log("Robot B connected at $ip")
                 }
             }
         }
@@ -298,18 +297,30 @@ class RobotCoordinator {
         if (ip.isBlank()) return
         coroutineScope.launch {
             try {
-                // Sanitize IP to prevent Android from attempting a DNS lookup on a literal IP
-                val cleanIp = ip.replace("/", "").trim()
-                val address = InetAddress.getByName(cleanIp)
+                // Parse numeric IP directly to avoid DNS resolution failures
+                // on hotspots that lack a DNS server
+                val address = parseNumericIp(ip) ?: InetAddress.getByName(ip)
                 val bytes = message.toByteArray()
                 val packet = DatagramPacket(bytes, bytes.size, address, udpPort)
                 val socket = DatagramSocket()
                 socket.send(packet)
                 socket.close()
             } catch (e: Exception) {
-                e.printStackTrace()
+                log("SYS Error TX: ${e.message}")
             }
         }
+    }
+
+    private fun parseNumericIp(ip: String): InetAddress? {
+        val parts = ip.split(".")
+        if (parts.size != 4) return null
+        val bytes = ByteArray(4)
+        for (i in 0..3) {
+            val v = parts[i].toIntOrNull() ?: return null
+            if (v < 0 || v > 255) return null
+            bytes[i] = v.toByte()
+        }
+        return InetAddress.getByAddress(bytes)
     }
 
     private fun log(msg: String) {

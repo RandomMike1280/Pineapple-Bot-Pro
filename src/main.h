@@ -4,97 +4,11 @@
 #include <Arduino.h>
 #include <esp32_motor.hpp>
 #include <esp32_servo.hpp>
-#include <ps2x.hpp>
-
-// ============================================================================
-// PS2 Controller Setup
-// ============================================================================
-#define PS2_DAT  1
-#define PS2_CMD  2
-#define PS2_CS   4
-#define PS2_CLK  5
-
-typedef struct {
-    uint8_t pressed;
-    uint8_t lastPressed;
-    int8_t X;
-    int8_t Y;
-} JoyStickButton;
-extern JoyStickButton leftJoy;
-extern JoyStickButton rightJoy;
-
-typedef struct {
-    uint8_t up;
-    uint8_t down;
-    uint8_t left;
-    uint8_t right;
-} DPadButton;
-extern DPadButton DPad;
-extern DPadButton lastDPad;
-
-typedef struct {
-    uint8_t triangle;
-    uint8_t circle;
-    uint8_t cross;
-    uint8_t square;
-} geoPadButton;
-extern geoPadButton GeoPad;
-extern geoPadButton lastGeoPad;
-
-typedef struct {
-    uint8_t L1;
-    uint8_t L2;
-    uint8_t R1;
-    uint8_t R2;
-} shoulderButton;
-extern shoulderButton Shoulder;
-extern shoulderButton lastShoulder;
-
-#define joyThres 15
-void getRemoteState(PS2X &remote);
-
-#define pressedButton(current, last) ((current == 1 && last == 0) ? 1 : 0)
-#define releasedButton(current, last) ((current == 0 && last == 1) ? 1 : 0)
-
-#define verticalVelocity leftJoy.Y
-#define horizontalVelocity leftJoy.X
-#define angularVelocity rightJoy.X
-
-// ============================================================================
-// Physics & Motor Modeling
-// ============================================================================
-#define SLOW_SPEED
-
-#ifdef FAST_SPEED
-#define MAX_SPEED 100
-#define vRate 0.01
-#define hRate 0.01
-#define angularRate 0.01
-#endif
-
-#ifdef SLOW_SPEED
-#define MAX_SPEED 100
-#define vRate (0.005 * 0.8888888889)
-#define hRate (0.00625 * 0.8888888889)
-#define angularRate 0.005
-#endif
-
-#define MOTOR_STOP_THRESHOLD    20
-#define KICKSTART_FRAMES        3
-#define KICKSTART_SPEED         70.0
-
-extern int mspeed[4];
-extern double mspeedf[4];
-extern int mkickstart[4];
-
-int sign(double x);
-int speed_to_motor_duty(double speed);
-void calculateMotorSpeeds();
 
 // ============================================================================
 // Robot Identity — change to "B" when flashing the second robot
 // ============================================================================
-#define BOT_ID "0"
+#define BOT_ID "A"
 
 // ============================================================================
 // Operating Mode
@@ -102,25 +16,48 @@ void calculateMotorSpeeds();
 // #define TEST_MODE // Uncomment to enable test mode (no motors, print commands, blinking LED)
 
 #ifndef LED
-#define LED 47 // Default LED pin updated per manual controls
+#define LED 2 // Default LED pin if not defined elsewhere
 #endif
 
 // ============================================================================
 // Speed Calibration (mm/s at each speed level)
 // ============================================================================
-// Based on 5cm wheels, max speed is ~72.5 mm/s.
-#define SPEED_SLOW_MM_S    36.0f
-#define SPEED_NORMAL_MM_S  55.0f
-#define SPEED_FAST_MM_S    72.5f
+// Measured from PS2 controller physics:
+//   Linear speed at max duty (100): ~72.5 mm/s (7.25 cm/s)
+//   Rotation at max duty (100): 86.4 deg/s (0.24 interval/sec)
+//   Both scale linearly with duty.
+//
+// Speed levels are duty-cycle percentages that map to physical speeds.
+#define SPEED_SLOW_MM_S    29.0f    // duty ~40 → 72.5 * 0.4
+#define SPEED_NORMAL_MM_S  43.5f    // duty ~60 → 72.5 * 0.6
+#define SPEED_FAST_MM_S    72.5f    // duty ~100 → 72.5 * 1.0
+
+// Rotation speed calibration (deg/s at each speed level)
+#define SPEED_SLOW_DEG_S    18.0f    // reduced for fine camera-guided alignment
+#define SPEED_NORMAL_DEG_S  51.84f   // 86.4 * 0.6
+#define SPEED_FAST_DEG_S   86.4f     // 86.4 * 1.0
 
 // ============================================================================
 // Motor Duty Cycle Mapping (speed level → motor duty %)
 // ============================================================================
-// The mecanum inverse kinematics expects a "base duty" for each speed level.
-// (This is transitioning to the new physics model, but retained for legacy bridging)
+// These are the raw duty values sent to Motor.Run() for each speed level.
 #define DUTY_SLOW     40
 #define DUTY_NORMAL   60
-#define DUTY_FAST     85
+#define DUTY_FAST     100
+
+// ============================================================================
+// Translation Drift Trim (speed-dependent)
+// ============================================================================
+// The mecanum wheels produce a systematic leftward bias during translation.
+// The bias is much stronger at low duty cycles where motor asymmetries dominate.
+// We pre-rotate the velocity vector CW by the appropriate angle to compensate.
+//
+// Slow:  measured 9.31°, 9.63°, 9.13° → avg 9.36°
+// Normal: significantly reduced (estimate ~2.5°, tune as needed)
+// Fast:   unknown, default 0 (tune after measurement)
+#define DRIFT_TRIM_SLOW_DEG    0.0f
+#define DRIFT_TRIM_NORMAL_DEG  0.0f
+#define DRIFT_TRIM_FAST_DEG    0.0f
 
 // ============================================================================
 // Correction Thresholds
@@ -138,17 +75,39 @@ void calculateMotorSpeeds();
 #define CONTROL_LOOP_INTERVAL_MS 10       // main loop target period
 
 // ============================================================================
-// Mecanum Kinematics — same math from the original main.h
+// Mecanum Kinematics — from PS2 controller physics
 // ============================================================================
 // Motor layout (top view):
 //   M4(FL) ---- M1(FR)
 //     |            |
 //   M3(BL) ---- M2(BR)
 //
-// For pure translations:
-//   Forward:  all motors forward
-//   Right:    FL+BR forward, FR+BL backward (strafe)
-//   Rotation: left side forward, right side backward
+// PS2 mecanum formula (V, H, A in normalized [-1, 1] range):
+//   FR = -V + H + A
+//   BR = -V - H + A
+//   BL =  V - H + A
+//   FL =  V + H + A
+//
+// Convention: V > 0 = forward, H > 0 = right, A > 0 = CW rotation
+
+// Motor stop threshold — below this duty, motors stall
+#define MOTOR_STOP_THRESHOLD    20
+
+// Kickstart: briefly boost duty to overcome static friction
+#define KICKSTART_FRAMES        3
+#define KICKSTART_SPEED         70.0
+
+// Acceleration ramp: gradually increase motor duty at segment start
+// to synchronize wheel engagement and reduce drift from motor timing mismatch.
+// Ramp goes from RAMP_START_FRACTION to 1.0 over RAMP_DURATION_MS.
+#define RAMP_DURATION_MS        150     // ms to reach full speed from start
+#define RAMP_START_FRACTION     0.15f   // initial duty fraction (just enough to overcome friction)
+
+// speed_to_motor_duty: converts normalized speed [-1,1] to motor duty [-100,100]
+// From PS2 calibration: duty = 43.0174134490 * speed + 57.16498038405947 * sign(speed)
+// This compensates for the motor dead zone so that the robot moves linearly
+// with the input speed value.
+int speed_to_motor_duty(double speed);
 
 struct MecanumSpeeds {
     int m1;  // Front Right
@@ -157,11 +116,10 @@ struct MecanumSpeeds {
     int m4;  // Front Left
 };
 
-/// Compute individual motor speeds from velocity components.
-/// V = forward/backward component (-100..100)
-/// H = left/right strafe component (-100..100)
-/// A = angular/rotation component (-100..100, optional, default 0)
-MecanumSpeeds computeMecanumSpeeds(int V, int H, int A = 0);
+/// Compute individual motor duties from normalized velocity components.
+/// V = forward/backward (-1..1), H = strafe (-1..1), A = rotation (-1..1)
+/// Applies speed_to_motor_duty, normalization, and kickstart.
+MecanumSpeeds computeMecanumSpeeds(double V, double H, double A);
 
 // ============================================================================
 // Per-Bot Servo Configuration (from legacy main_bk.cpp)
