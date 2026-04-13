@@ -4,6 +4,92 @@
 #include <Arduino.h>
 #include <esp32_motor.hpp>
 #include <esp32_servo.hpp>
+#include <ps2x.hpp>
+
+// ============================================================================
+// PS2 Controller Setup
+// ============================================================================
+#define PS2_DAT  1
+#define PS2_CMD  2
+#define PS2_CS   4
+#define PS2_CLK  5
+
+typedef struct {
+    uint8_t pressed;
+    uint8_t lastPressed;
+    int8_t X;
+    int8_t Y;
+} JoyStickButton;
+extern JoyStickButton leftJoy;
+extern JoyStickButton rightJoy;
+
+typedef struct {
+    uint8_t up;
+    uint8_t down;
+    uint8_t left;
+    uint8_t right;
+} DPadButton;
+extern DPadButton DPad;
+extern DPadButton lastDPad;
+
+typedef struct {
+    uint8_t triangle;
+    uint8_t circle;
+    uint8_t cross;
+    uint8_t square;
+} geoPadButton;
+extern geoPadButton GeoPad;
+extern geoPadButton lastGeoPad;
+
+typedef struct {
+    uint8_t L1;
+    uint8_t L2;
+    uint8_t R1;
+    uint8_t R2;
+} shoulderButton;
+extern shoulderButton Shoulder;
+extern shoulderButton lastShoulder;
+
+#define joyThres 15
+void getRemoteState(PS2X &remote);
+
+#define pressedButton(current, last) ((current == 1 && last == 0) ? 1 : 0)
+#define releasedButton(current, last) ((current == 0 && last == 1) ? 1 : 0)
+
+#define verticalVelocity leftJoy.Y
+#define horizontalVelocity leftJoy.X
+#define angularVelocity rightJoy.X
+
+// ============================================================================
+// Physics & Motor Modeling
+// ============================================================================
+#define SLOW_SPEED
+
+#ifdef FAST_SPEED
+#define MAX_SPEED 100
+#define vRate 0.01
+#define hRate 0.01
+#define angularRate 0.01
+#endif
+
+#ifdef SLOW_SPEED
+#define MAX_SPEED 100
+#define vRate (0.005 * 0.8888888889)
+#define hRate (0.00625 * 0.8888888889)
+#define angularRate 0.005
+#endif
+
+#define MOTOR_STOP_THRESHOLD    20
+#define KICKSTART_FRAMES        3
+#define KICKSTART_SPEED         70.0
+
+extern int mspeed[4];
+extern double mspeedf[4];
+extern int mkickstart[4];
+
+int sign(double x);
+int speed_to_motor_duty(double speed);
+void calculateMotorSpeeds();
 
 // ============================================================================
 // Robot Identity — change to "B" when flashing the second robot
@@ -16,28 +102,23 @@
 // #define TEST_MODE // Uncomment to enable test mode (no motors, print commands, blinking LED)
 
 #ifndef LED
-#define LED 2 // Default LED pin if not defined elsewhere
+#define LED 47 // Default LED pin updated per manual controls
 #endif
 
 // ============================================================================
 // Speed Calibration (mm/s at each speed level)
 // ============================================================================
-// IMPORTANT: Measure these on your actual surface!
-// Procedure:  send a "fast" command for 2 seconds, measure how far the robot
-// traveled (in mm), divide by 2.  That's your SPEED_FAST_MM_S.
-// Repeat for slow and normal duty cycles.
-//
-// These are conservative starting defaults for a mecanum bot.
-#define SPEED_SLOW_MM_S    100.0f
-#define SPEED_NORMAL_MM_S  250.0f
-#define SPEED_FAST_MM_S    450.0f
+// Based on 5cm wheels, max speed is ~72.5 mm/s.
+#define SPEED_SLOW_MM_S    36.0f
+#define SPEED_NORMAL_MM_S  55.0f
+#define SPEED_FAST_MM_S    72.5f
 
 // ============================================================================
 // Motor Duty Cycle Mapping (speed level → motor duty %)
 // ============================================================================
 // The mecanum inverse kinematics expects a "base duty" for each speed level.
-// This is the duty cycle (0-100) sent to motors for straight-line motion.
-#define DUTY_SLOW     35
+// (This is transitioning to the new physics model, but retained for legacy bridging)
+#define DUTY_SLOW     40
 #define DUTY_NORMAL   60
 #define DUTY_FAST     85
 

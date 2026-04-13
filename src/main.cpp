@@ -51,125 +51,206 @@ float currentVx = 0;  // mm/s
 float currentVy = 0;  // mm/s
 float currentOmega = 0; // deg/s
 
-// Speed level → motor duty% mapping
-int getMotorDuty(SpeedLevel level) {
-    switch (level) {
-        case SpeedLevel::SLOW:   return DUTY_SLOW;
-        case SpeedLevel::NORMAL: return DUTY_NORMAL;
-        case SpeedLevel::FAST:   return DUTY_FAST;
-        default:                 return DUTY_NORMAL;
+// ============================================================================
+// Remote Control Definitions
+// ============================================================================
+JoyStickButton leftJoy;
+JoyStickButton rightJoy;
+DPadButton DPad;
+DPadButton lastDPad;
+geoPadButton GeoPad;
+geoPadButton lastGeoPad;
+shoulderButton Shoulder;
+shoulderButton lastShoulder;
+
+int mspeed[4]       = {0};
+double mspeedf[4]   = {0.};
+int mkickstart[4]   = {KICKSTART_FRAMES, KICKSTART_FRAMES, KICKSTART_FRAMES, KICKSTART_FRAMES};
+
+PS2X remote;
+
+// Servo thresholds
+#define GRABBA_ANGLE    45
+#define SLIDER_UP       40
+#define SLIDER_DOWN     87
+#define ARM_UP          0
+#define ARM_DOWN        70
+
+void getRemoteState(PS2X &remote) {
+    remote.read_gamepad();
+    leftJoy.pressed = remote.Button(PSB_L3);
+    leftJoy.X = remote.Analog(PSS_LX) - 128;
+    leftJoy.Y = 127 - remote.Analog(PSS_LY);
+    rightJoy.pressed = remote.Button(PSB_R3);
+    rightJoy.X = remote.Analog(PSS_RX) - 128;
+    rightJoy.Y = 127 - remote.Analog(PSS_RY);
+    
+    if (leftJoy.X > 0) leftJoy.X = map(leftJoy.X, 0, 127, 0, 100);
+    else leftJoy.X = map(leftJoy.X, -128, 0, -100, 0);
+    
+    if (leftJoy.Y > 0) leftJoy.Y = map(leftJoy.Y, 0, 127, 0, 100);
+    else leftJoy.Y = map(leftJoy.Y, -128, 0, -100, 0);
+    
+    if (rightJoy.X > 0) rightJoy.X = map(rightJoy.X, 0, 127, 0, 100);
+    else rightJoy.X = map(rightJoy.X, -128, 0, -100, 0);
+    
+    if (rightJoy.Y > 0) rightJoy.Y = map(rightJoy.Y, 0, 127, 0, 100);
+    else rightJoy.Y = map(rightJoy.Y, -128, 0, -100, 0);
+    
+    if (abs(rightJoy.X) < joyThres) rightJoy.X = 0;
+    if (abs(rightJoy.Y) < joyThres) rightJoy.Y = 0;
+    if (abs(leftJoy.X) < joyThres) leftJoy.X = 0;
+    if (abs(leftJoy.Y) < joyThres) leftJoy.Y = 0;
+    
+    DPad.up = remote.Button(PSB_PAD_UP);
+    DPad.down = remote.Button(PSB_PAD_DOWN);
+    DPad.left = remote.Button(PSB_PAD_LEFT);
+    DPad.right = remote.Button(PSB_PAD_RIGHT);
+    
+    GeoPad.triangle = remote.Button(PSB_TRIANGLE);
+    GeoPad.circle = remote.Button(PSB_CIRCLE);
+    GeoPad.cross = remote.Button(PSB_CROSS);
+    GeoPad.square = remote.Button(PSB_SQUARE);
+    
+    Shoulder.L1 = remote.Button(PSB_L1);
+    Shoulder.L2 = remote.Button(PSB_L2);
+    Shoulder.R1 = remote.Button(PSB_R1);
+    Shoulder.R2 = remote.Button(PSB_R2);
+}
+
+int sign(double x) {
+    return (x > 0) - (x < 0);
+}
+
+int speed_to_motor_duty(double speed) {
+    if (speed > 0) {
+        return 43.0174134490 * speed + 57.16498038405947;
+    } else if (speed < 0) {
+        return 43.0174134490 * speed - 57.16498038405947;
     }
+    return 0;
 }
 
 // ============================================================================
-// Mecanum kinematics implementation
-// ============================================================================
-MecanumSpeeds computeMecanumSpeeds(int V, int H, int A) {
-    MecanumSpeeds s;
-    s.m1 = V - H - A;  // Front Right
-    s.m2 = V + H - A;  // Back Right
-    s.m3 = V - H + A;  // Back Left
-    s.m4 = V + H + A;  // Front Left
-
-    // Normalize to [-100, 100] if any motor exceeds range
-    int maxSpeed = max(max(abs(s.m1), abs(s.m2)), max(abs(s.m3), abs(s.m4)));
-    if (maxSpeed > 100) {
-        s.m1 = (s.m1 * 100) / maxSpeed;
-        s.m2 = (s.m2 * 100) / maxSpeed;
-        s.m3 = (s.m3 * 100) / maxSpeed;
-        s.m4 = (s.m4 * 100) / maxSpeed;
-    }
-    return s;
-}
-
-// ============================================================================
-// Apply motor speeds from current motion queue state
+// Hybrid applyMotors (Manual override & Physics modeling)
 // ============================================================================
 void applyMotors() {
-    float vx, vy, omega;
-    motionQueue.getCurrentVelocity(vx, vy, omega);
-    currentVx = vx;
-    currentVy = vy;
-    currentOmega = omega;
+    float V = 0, H = 0, A = 0;
+    
+    float joy_V = verticalVelocity * vRate;
+    float joy_H = horizontalVelocity * hRate;
+    float joy_A = angularVelocity * angularRate;
+    
+    // Check manual override
+    if (abs(joy_V) > 0.01f || abs(joy_H) > 0.01f || abs(joy_A) > 0.01f) {
+        motionQueue.abort(); // Cancel autonomous path explicitly
+        V = joy_V;
+        H = joy_H;
+        A = joy_A;
+    } else {
+        // Autonomous execution
+        float vx, vy, omega;
+        motionQueue.getCurrentVelocity(vx, vy, omega);
+        
+        if (vx == 0 && vy == 0 && omega == 0) {
+            V = H = A = 0;
+        } else {
+            // Apply speed scaling base on level profile (SLOW/NORMAL/FAST relative to FAST max)
+            const MotionSegment* seg = motionQueue.currentSegment();
+            float speed_scale = seg ? (seg->speed_mm_s / SPEED_FAST_MM_S) : 0.0f;
+            
+            V = (vy / SPEED_FAST_MM_S) * speed_scale;
+            H = (vx / SPEED_FAST_MM_S) * speed_scale;
+            
+            // Normalize Rotation
+            if (omega != 0) {
+                // Invert Math CCW (+) to Mechanical CCW (-) for mecanums
+                A = -(omega / 86.4f) * speed_scale;
+            } else {
+                // Passive translation drift correction
+                float cx, cy, c_angle;
+                deadReckoning.getCurrentPosition(cx, cy, c_angle);
+                float target_angle = seg ? seg->target_angle : c_angle;
+                float angle_err = target_angle - c_angle;
+                while (angle_err > 180.0f) angle_err -= 360.0f;
+                while (angle_err < -180.0f) angle_err += 360.0f;
+                
+                float Kp_angle = 1.0f / 86.4f; // Scale proportional gain back to normalized A
+                A = -Kp_angle * angle_err;
+                if (A > 0.3f) A = 0.3f;
+                if (A < -0.3f) A = -0.3f; // Limit drift correction 
+            }
+        }
+    }
 
-    static bool was_moving = false;
-    static uint32_t move_start_time = 0;
-
-    if (vx == 0 && vy == 0 && omega == 0) {
-        was_moving = false;
-        // No active segment — stop motors
+    if (V == 0 && H == 0 && A == 0) {
+        // Halt physical motion fully, allowing kickstarts to reset
+        for (int i = 0; i < 4; i++) mspeed[i] = 0;
 #ifndef TEST_MODE
         Motor1.Stop();
         Motor2.Stop();
         Motor3.Stop();
         Motor4.Stop();
 #endif
+        currentVx = currentVy = currentOmega = 0;
         return;
     }
 
-    // Determine duty cycle from the active segment's speed level
-    const MotionSegment* seg = motionQueue.currentSegment();
-    int duty = seg ? getMotorDuty(seg->speed) : DUTY_NORMAL;
-    float max_speed = seg ? seg->speed_mm_s : 250.0f;
-
-    // --- KICKSTART LOGIC ---
-    // Break static friction by driving at 100% duty for the first 100ms
-    if (!was_moving) {
-        was_moving = true;
-        move_start_time = millis();
-    }
-    if (millis() - move_start_time < 100) {
-        duty = 100;
-    }
-    // -----------------------
-
-    // Convert continuous velocity vector to proportional mecanum V/H components
-    // vx > 0 = right = strafe, vy > 0 = forward
-    int V = 0, H = 0;
-    if (max_speed > 0.1f) {
-        V = (int)((vy / max_speed) * duty);
-        H = (int)((vx / max_speed) * duty);
-    }
-
-    float cx, cy, c_angle;
-    deadReckoning.getCurrentPosition(cx, cy, c_angle);
-    float target_angle = seg ? seg->target_angle : c_angle;
-
-    float angle_err = target_angle - c_angle;
-    while (angle_err > 180.0f) angle_err -= 360.0f;
-    while (angle_err < -180.0f) angle_err += 360.0f;
-
-    int A = 0;
-    if (omega != 0) {
-        // Active rotation segment
-        if (max_speed > 0.1f) {
-            // INVERT omega: Mathematical CCW is positive, but mecanums need A < 0 to spin CCW
-            A = (int)((-omega / max_speed) * duty);
+    // Kinematics matching Motor bindings [0=FR, 1=BR, 2=FL, 3=BL]
+    mspeedf[0] = static_cast<double>(V - H - A); // Motor 1 - Front Right
+    mspeedf[1] = static_cast<double>(V + H - A); // Motor 2 - Back Right
+    mspeedf[2] = static_cast<double>(V + H + A); // Motor 3 - Front Left
+    mspeedf[3] = static_cast<double>(V - H + A); // Motor 4 - Back Left
+    
+    // Scale fractions through physics lookup table
+    for (int i = 0; i < 4; i++) {
+        if (abs(mspeedf[i]) > 0) { 
+            mspeedf[i] = speed_to_motor_duty(mspeedf[i]);
         }
-    } else {
-        // Pure translation, passively counteract drift
-        float Kp_angle = 1.0f;
-        // INVERT Kp_angle: to counteract CCW drift, push the opposite way
-        A = (int)(-Kp_angle * angle_err);
-        
-        int max_A = 30; // Limit rotational output during translation
-        if (A > max_A) A = max_A;
-        if (A < -max_A) A = -max_A;
     }
 
-    MecanumSpeeds s = computeMecanumSpeeds(V, H, A);
+    // Safely Cap to [-100, 100] without distorting vectors mathematically
+    double maxSpeed = 0;
+    for (int i = 0; i < 4; i++) {
+        maxSpeed = max(maxSpeed, abs(mspeedf[i]));
+    }
+    if (maxSpeed > MAX_SPEED) {
+        for (int i = 0; i < 4; i++) {
+            mspeedf[i] = mspeedf[i] / maxSpeed * MAX_SPEED;
+        }
+    }
+
+    // Frame-based 70% Kickstart
+    for (int i = 0; i < 4; i++) {
+        if (abs(mspeedf[i]) < MOTOR_STOP_THRESHOLD) {
+            mkickstart[i] = KICKSTART_FRAMES;
+        }
+        if (mkickstart[i] > 0 && abs(mspeedf[i]) >= MOTOR_STOP_THRESHOLD) {
+            mkickstart[i]--;
+            mspeedf[i] = sign(mspeedf[i]) * max((double)KICKSTART_SPEED, abs(mspeedf[i]));
+        }
+    }
+
+    for (int i = 0; i < 4; i++) {
+        mspeed[i] = static_cast<int>(mspeedf[i]);
+    }
+
+    // Plumb physical approximation back to dead-reckoning engine:
+    currentVx = H * SPEED_FAST_MM_S;
+    currentVy = V * SPEED_FAST_MM_S;
+    currentOmega = -A * 86.4f;
 
 #ifdef TEST_MODE
     static unsigned long lastPrintTime = 0;
     if (millis() - lastPrintTime >= 500) {
-        Serial.printf("[TEST MODE] Virtual Motors: M1=%d, M2=%d, M3=%d, M4=%d\n", s.m1, s.m2, s.m3, s.m4);
+        Serial.printf("[TEST MODE] Virtual Motors: M1=%d, M2=%d, M3=%d, M4=%d\n", mspeed[0], mspeed[1], mspeed[2], mspeed[3]);
         lastPrintTime = millis();
     }
 #else
-    Motor1.Run(s.m1);
-    Motor2.Run(s.m2);
-    Motor3.Run(s.m3);
-    Motor4.Run(s.m4);
+    Motor1.Run(mspeed[0]);
+    Motor2.Run(mspeed[1]);
+    Motor3.Run(mspeed[2]);
+    Motor4.Run(mspeed[3]);
 #endif
 }
 
@@ -341,7 +422,7 @@ void sendPing() {
 // SETUP
 // ============================================================================
 void setup() {
-    Serial.begin(115200);
+    Serial.begin(921600);
     delay(1000);
 
     Serial.println("\n========================================");
@@ -357,8 +438,20 @@ void setup() {
         Serial.print(".");
     }
     Serial.println("\nConnected!");
+    
+    // Ensure we actually got an IP assigned before continuing
+    while (WiFi.localIP()[0] == 0) {
+        delay(100);
+    }
+    
     Serial.printf("  Robot IP:  %s\n", WiFi.localIP().toString().c_str());
     phoneIP = WiFi.gatewayIP();
+    
+    // Ensure Gateway IP is valid
+    while (phoneIP[0] == 0) {
+        delay(100);
+        phoneIP = WiFi.gatewayIP();
+    }
     Serial.printf("  Phone IP:  %s\n", phoneIP.toString().c_str());
 
     udp.begin(udpPort);
@@ -368,6 +461,26 @@ void setup() {
 
     Motor1.Reverse();
     Motor2.Reverse();
+    
+    // Initialize Manual control connection
+    byte error = remote.config_gamepad(PS2_CLK, PS2_CMD, PS2_CS, PS2_DAT);
+    if (error) {
+        ledcSetup(7, 10, 12); // Channel 7, 10 kHz, 12-bit resolution
+        ledcAttachPin(LED, 7);
+        ledcWrite(7, 2048); // Turn on LED to indicate error
+        
+        unsigned long failInit = millis();
+        while (error) {
+            error = remote.config_gamepad(PS2_CLK, PS2_CMD, PS2_CS, PS2_DAT);
+            if (millis() - failInit > 3000) break; // Bypass if 3 seconds past, allowing UDP to live
+        }
+        ledcWrite(7, 0); // Turn off LED
+        ledcDetachPin(LED);
+    }
+    
+    servo1.write(GRABBA_ANGLE);
+    servo2.write(SLIDER_DOWN);
+    servo3.write(ARM_UP);
 
     motionQueue.setSpeedCalibration(SPEED_SLOW_MM_S, SPEED_NORMAL_MM_S, SPEED_FAST_MM_S);
 
@@ -409,13 +522,23 @@ void loop() {
         handleIncomingUdp();
     }
 
-    // ---- 2. Tick the motion queue ----
+    // ---- 2. Handle Joystick Servos ----
+    getRemoteState(remote);
+    
+    if (pressedButton(DPad.left, lastDPad.left)) servo1.write(GRABBA_ANGLE * 2);
+    if (pressedButton(DPad.right, lastDPad.right)) servo1.write(0);
+    if (pressedButton(GeoPad.triangle, lastGeoPad.triangle)) servo1.write(GRABBA_ANGLE);
+    
+    if (pressedButton(Shoulder.L1, lastShoulder.L1)) servo2.write(SLIDER_UP);
+    if (pressedButton(Shoulder.L2, lastShoulder.L2)) servo2.write(SLIDER_DOWN);
+    if (pressedButton(Shoulder.R1, lastShoulder.R1)) servo3.write(ARM_DOWN);
+    if (pressedButton(Shoulder.R2, lastShoulder.R2)) servo3.write(ARM_UP);
+    
+    // ---- 3. Tick the motion queue ----
     bool moving = motionQueue.tick(dt);
 
-    // If a segment just completed with deferred correction, apply it now
     if (motionQueue.segmentJustCompleted) {
         CorrectionPolicy prevPolicy = motionQueue.getActivePolicy();
-        // The just-completed segment's correction is stored
         float errX, errY, errAngle;
         motionQueue.getDeferredCorrection(errX, errY, errAngle);
         float errMag = sqrtf(errX * errX + errY * errY);
@@ -425,9 +548,8 @@ void loop() {
         }
     }
 
-    // ---- 3. Handle emergency deceleration ----
+    // ---- 4. Handle emergency deceleration ----
     if (latencyComp.wasEmergencyTriggered() && moving) {
-        // Briefly stop motors for correction to take effect
 #ifndef TEST_MODE
         Motor1.Stop();
         Motor2.Stop();
@@ -436,13 +558,20 @@ void loop() {
 #else
         Serial.println("[TEST MODE] Virtual emergency stop pause");
 #endif
-        delay(50);  // 50ms pause — short enough to be barely noticeable
+        delay(50);
     }
 
-    // ---- 4. Apply motor speeds ----
+    // ---- 5. Apply motor speeds (Hybrid loop) ----
     applyMotors();
+    
+    // Cache controller state for next frame
+    leftJoy.lastPressed = leftJoy.pressed;
+    rightJoy.lastPressed = rightJoy.pressed;
+    lastDPad = DPad;
+    lastGeoPad = GeoPad;
+    lastShoulder = Shoulder;
 
-    // ---- 5. Update dead-reckoning ----
+    // ---- 6. Update dead-reckoning ----
     deadReckoning.update(currentVx, currentVy, currentOmega, dt);
 
     // ---- 6. Periodic broadcasts ----

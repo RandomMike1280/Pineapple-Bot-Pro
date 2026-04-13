@@ -290,7 +290,9 @@ class RobotCoordinator {
         if (ip.isBlank()) return
         coroutineScope.launch {
             try {
-                val address = InetAddress.getByName(ip)
+                // Sanitize IP to prevent Android from attempting a DNS lookup on a literal IP
+                val cleanIp = ip.replace("/", "").trim()
+                val address = InetAddress.getByName(cleanIp)
                 val bytes = message.toByteArray()
                 val packet = DatagramPacket(bytes, bytes.size, address, udpPort)
                 val socket = DatagramSocket()
