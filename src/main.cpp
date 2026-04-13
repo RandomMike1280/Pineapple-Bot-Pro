@@ -112,12 +112,13 @@ MecanumSpeeds computeMecanumSpeeds(double V, double H, double A) {
     MecanumSpeeds s;
     double mspeedf[4];
 
-    // Mecanum formula for mirrored front/back motor layout
-    // V uniform across all motors (translation), A differential left/right (rotation)
-    mspeedf[0] =  - V + H + A;  // Front Right
-    mspeedf[1] =  - V - H + A;  // Back Right
-    mspeedf[3] =  V - H + A;  // Back Left
-    mspeedf[2] =  V + H + A;  // Front Left
+    // Mecanum formula with mirrored front/back motors
+    // Mirrored layout swaps V↔H: H=forward/back, V=strafe left/right
+    // Diagonal pairing: FL+BR share +V, FR+BL share -V
+    mspeedf[0] = -H - V - A;  // Front Right
+    mspeedf[1] = -H + V - A;  // Back Right
+    mspeedf[2] = -H + V + A;  // Front Left
+    mspeedf[3] = -H - V + A;  // Back Left
 
     // Apply speed_to_motor_duty to compensate for motor dead zone
     for (int i = 0; i < 4; i++) {
@@ -236,8 +237,8 @@ void applyMotors() {
 
     // Drift trim: pre-rotate (V, H) CCW by a speed-dependent angle to counteract
     // the measured systematic leftward bias in translation.
-    // Motor1/2 are reversed, so positive H in the formula = leftward physical strafe.
-    // To compensate leftward drift, we need negative H → CCW rotation of velocity.
+    // With corrected mecanum formula, positive H = rightward physical strafe.
+    // To compensate leftward drift, we need positive H → CW rotation of velocity.
     {
         float trim_deg = 0;
         if (seg) {

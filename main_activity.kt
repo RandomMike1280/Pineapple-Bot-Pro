@@ -440,6 +440,8 @@ class ArUcoTracker(
                 
                 if (perspectiveTransform != null) {
                     org.opencv.core.Core.perspectiveTransform(ptSrc, ptDst, perspectiveTransform)
+
+                    // x, y is swapped because the phone is rotated horizontally while still in potrait mode
                     val realX = ptDst.get(0, 0)[0].toFloat()
                     val realY = ptDst.get(0, 0)[1].toFloat()
 

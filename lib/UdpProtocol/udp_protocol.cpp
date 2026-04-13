@@ -108,10 +108,14 @@ bool parseUdpMessage(const char* buffer, int len, UdpMessage &out) {
                     out.correctionPolicy != CorrectionPolicy::INVALID);
 
         case 'W': // WAYPOINT — W:<target_x>:<target_y>:<speed>:<policy>
+            // Because the phone is rotated on it's side while in portrait mode,
+            // The phone's XY coordinate system directly translates to YX on the robot's coordinate system
+            // We thereby swap X and Y to resolve this conflict
             if (numTokens < 5) return false;
             out.type = MsgType::WAYPOINT;
             out.target_x        = atof(tokens[1]);
             out.target_y        = atof(tokens[2]);
+            std::swap(out.target_x, out.target_y);
             out.speed           = parseSpeed(tokens[3]);
             out.correctionPolicy = parsePolicy(tokens[4]);
             return (out.speed != SpeedLevel::INVALID &&
@@ -127,11 +131,15 @@ bool parseUdpMessage(const char* buffer, int len, UdpMessage &out) {
                     out.correctionPolicy != CorrectionPolicy::INVALID);
 
         case 'C': // CAM — C:<timestamp>:<x>:<y>[:<angle>]
+            // Because the phone is rotated on it's side while in portrait mode,
+            // The phone's XY coordinate system directly translates to YX on the robot's coordinate system
+            // We thereby swap X and Y to resolve this conflict
             if (numTokens < 4) return false;
             out.type = MsgType::CAM;
             out.cam_timestamp = (uint32_t)strtoul(tokens[1], NULL, 10);
             out.cam_x = atof(tokens[2]);
             out.cam_y = atof(tokens[3]);
+            std::swap(out.cam_x, out.cam_y);
             out.cam_angle = (numTokens >= 5) ? atof(tokens[4]) : 0.0f;
             return true;
 
@@ -198,7 +206,10 @@ int buildPongMessage(char* buf, int maxLen, uint32_t origTimestamp) {
 
 int buildStatusMessage(char* buf, int maxLen,
                        float x, float y, int queueLen, float driftMm) {
-    return snprintf(buf, maxLen, "S:%.1f:%.1f:%d:%.1f", x, y, queueLen, driftMm);
+    // Because the phone is rotated on it's side while in portrait mode,
+    // The phone's XY coordinate system directly translates to YX on the robot's coordinate system
+    // We thereby swap X and Y to resolve this conflict
+    return snprintf(buf, maxLen, "S:%.1f:%.1f:%d:%.1f", y, x, queueLen, driftMm);
 }
 
 int buildRegisterMessage(char* buf, int maxLen,
