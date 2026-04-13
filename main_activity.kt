@@ -159,6 +159,14 @@ class RobotCoordinator {
     }
 
     private fun handleIncoming(message: String, senderIp: String) {
+        // Intercept new broadcast message type
+        val helloPrefix = "hello, i am robot id "
+        if (message.startsWith(helloPrefix)) {
+            val id = message.substring(helloPrefix.length).trim()
+            onRobotDiscovered(id, senderIp)
+            return
+        }
+
         val parts = message.split(":")
         if (parts.isEmpty()) return
 
@@ -179,25 +187,25 @@ class RobotCoordinator {
                 if (parts.size >= 2) parts[1].toLongOrNull()?.let { onPongReceived(senderIp, it) }
             }
             else -> {
-                if (message.startsWith("ESP32_HELLO")) onRobotDiscovered("A", senderIp)
+                if (message.startsWith("ESP32_HELLO")) onRobotDiscovered("0", senderIp)
             }
         }
     }
 
     private fun onRobotDiscovered(robotId: String, ip: String) {
         when (robotId) {
-            "A" -> {
+            "A", "0" -> {
                 val state = robotA.value
                 if (!state.connected || state.ip != ip) {
-                    robotA.value = state.copy(ip = ip, connected = true)
-                    log("Robot A connected at $ip")
+                    robotA.value = state.copy(id = "0", ip = ip, connected = true)
+                    log("Robot 0 connected at $ip")
                 }
             }
-            "B" -> {
+            "B", "1" -> {
                 val state = robotB.value
                 if (!state.connected || state.ip != ip) {
-                    robotB.value = state.copy(ip = ip, connected = true)
-                    log("Robot B connected at $ip")
+                    robotB.value = state.copy(id = "1", ip = ip, connected = true)
+                    log("Robot 1 connected at $ip")
                 }
             }
         }

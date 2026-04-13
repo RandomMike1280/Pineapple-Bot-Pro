@@ -14,6 +14,7 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include "main.h"
+#include "auto_discovery.h"
 #include <dead_reckoning.hpp>
 #include <motion_queue.hpp>
 #include <latency_compensator.hpp>
@@ -261,6 +262,10 @@ void handleIncomingUdp() {
     int packetSize = udp.parsePacket();
     if (!packetSize) return;
 
+    // Automatically latch the phone's IP since the phone controls the robot.
+    // This allows the robot to send PONGs and status back without hardcoding the IP.
+    phoneIP = udp.remoteIP();
+
     char buffer[256];
     int len = udp.read(buffer, sizeof(buffer) - 1);
     if (len <= 0) return;
@@ -396,16 +401,7 @@ void sendStatus() {
     udp.endPacket();
 }
 
-// ============================================================================
-// Send HELLO beacon for auto-discovery (every HELLO_INTERVAL_MS)
-// ============================================================================
-void sendHello() {
-    char buf[32];
-    int len = buildHelloMessage(buf, sizeof(buf), BOT_ID);
-    udp.beginPacket(phoneIP, udpPort);
-    udp.write((uint8_t*)buf, len);
-    udp.endPacket();
-}
+// Auto-discovery is now handled by auto_discovery.cpp
 
 // ============================================================================
 // Send PING for RTT measurement (every PING_INTERVAL_MS)
@@ -487,12 +483,8 @@ void setup() {
     latencyComp.init(&deadReckoning, &motionQueue);
     latencyComp.setThresholds(DRIFT_THRESHOLD_MM, EMERGENCY_THRESHOLD_MM);
 
-    // --- Send registration to phone ---
-    char regBuf[64];
-    int regLen = buildRegisterMessage(regBuf, sizeof(regBuf), BOT_ID, "mecanum4wd");
-    udp.beginPacket(phoneIP, udpPort);
-    udp.write((uint8_t*)regBuf, regLen);
-    udp.endPacket();
+    // --- Start auto-discovery broadcast ---
+    setupAutoDiscovery(udp, udpPort, BOT_ID);
 
 #ifdef TEST_MODE
     Serial.println("\n*** TEST MODE ENABLED ***");
@@ -580,10 +572,7 @@ void loop() {
         lastStatusTime = now;
     }
 
-    if (now - lastHelloTime >= HELLO_INTERVAL_MS) {
-        sendHello();
-        lastHelloTime = now;
-    }
+    tickAutoDiscovery(udp, udpPort, BOT_ID);
 
     if (now - lastPingTime >= PING_INTERVAL_MS) {
         sendPing();
