@@ -49,7 +49,7 @@ uint32_t lastPingTime   = 0;
 // ============================================================================
 // CAMERA_LATENCY_MS is now DEPRECATED. The robot now uses a "Time-Ago" 
 // mechanism where the phone explicitly reports its OpenCV processing delay.
-#define DRIFT_THRESHOLD_MM       20.0f    // apply full correction above this
+// #define DRIFT_THRESHOLD_MM       20.0f    // apply full correction above this
 
 // ============================================================================
 // Dual-core synchronization
@@ -287,20 +287,9 @@ void applyMotors() {
     while (angle_err < -180.0f) angle_err += 360.0f;
 
     double A = 0;
-    if (omega != 0) {
-        // Active rotation segment — normalize omega by max physical rotation speed
-        if (SPEED_FAST_DEG_S > 0.1f) {
-            A = -omega / SPEED_FAST_DEG_S;  // invert: math CCW+ → mecanum CW+
-            A *= rotationOnly ? 1.0 : motorRampFactor;
-        }
-    } else {
-        // Pure translation — actively counteract angular drift using
-        // dead-reckoning angle error (which includes camera corrections).
-        // At 9° error: A = 0.03 * 9 = 0.27 → strong but sub-clamp correction.
-        double Kp_angle = 0.03;
-        A = -Kp_angle * angle_err;
-        if (A > 0.3) A = 0.3;
-        if (A < -0.3) A = -0.3;
+    if (SPEED_FAST_DEG_S > 0.1f) {
+        A = -omega / SPEED_FAST_DEG_S;  // invert: math CCW+ → mecanum CW+
+        A *= rotationOnly ? 1.0 : motorRampFactor;
     }
 
     MecanumSpeeds s = computeMecanumSpeeds(V, H, A);
