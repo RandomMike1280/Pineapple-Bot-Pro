@@ -26,7 +26,7 @@
 #define SPEED_SCALING_FACTOR     1.0f     // Global multiplier for all movement speeds
 #define ROTATION_SCALING_FACTOR  1.0f     // Specific multiplier for rotational speed
 #define DISTANCE_FACTOR_V        1.0f     // Calibrates dead-reckoning for Vertical (Forward/Backward)
-#define DISTANCE_FACTOR_H        1.25f     // Calibrates dead-reckoning for Horizontal (Strafe)
+#define DISTANCE_FACTOR_H        1.25f    // Calibrates dead-reckoning for Horizontal (Strafe)
 
 // Measured from PS2 controller physics:
 //   Linear speed at max duty (100): ~72.5 mm/s (7.25 cm/s)
@@ -117,7 +117,7 @@
 #define KICKSTART_FRAMES        3
 #define KICKSTART_SPEED         70.0
 #define ROTATION_BRAKE_FRAMES   4
-#define ROTATION_BRAKE_DUTY     45
+#define ROTATION_BRAKE_DUTY     50
 #define ROTATION_BRAKE_MIN_OMEGA_DEG_S 5.0f
 
 // Acceleration ramp: gradually increase motor duty at segment start

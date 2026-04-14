@@ -24,7 +24,7 @@ void DeadReckoning::setDistanceFactors(float factor_h, float factor_v) {
 void DeadReckoning::reset(float x0, float y0, float angle0) {
     _x = x0;
     _y = y0;
-    _angle = angle0;
+    _angle = Rotation(angle0);
     _historyHead  = 0;
     _historyCount = 0;
     _corrActive   = false;
@@ -128,8 +128,8 @@ bool DeadReckoning::getPositionAt(uint32_t timestamp_ms, float &out_x, float &ou
             float t = (float)(timestamp_ms - a.timestamp_ms) / (float)span;
             out_x = a.x + (b.x - a.x) * t;
             out_y = a.y + (b.y - a.y) * t;
-            // Linearly interpolate angle as well. (Assuming continuous unwrapped angle).
-            out_angle = a.angle + (b.angle - a.angle) * t;
+            // Use shortest-path interpolation for angle
+            out_angle = Rotation::lerp(a.angle, b.angle, t);
             return true;
         }
     }

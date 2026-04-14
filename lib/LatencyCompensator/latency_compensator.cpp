@@ -1,5 +1,6 @@
 #include "latency_compensator.hpp"
 #include <math.h>
+#include "../Rotation/Rotation.hpp"
 
 // ============================================================================
 // Construction / Init
@@ -77,18 +78,16 @@ void LatencyCompensator::onCameraUpdate(uint32_t phoneTimestamp,
         return;
     }
 
-    // Step 3: Compute the drift error
+    // Step 3: Compute the drift error using modulo-360 Rotation logic
     _lastDriftX = observedX - estX;
     _lastDriftY = observedY - estY;
-    _lastDriftAngle = observedAngle - estAngle;
+    
+    // shortest path difference
+    _lastDriftAngle = Rotation(observedAngle) - Rotation(estAngle);
     
     // Telemetry: Compare Ground Truth (Camera) vs Robot's Belief (DR history)
     Serial.printf("[SYNC] Observed (Cam): %.1f | Estimated (DR): %.1f | Error: %.1f\n",
-                  observedAngle, estAngle, _lastDriftAngle);
-    
-    // Normalize angle error to [-180, 180]
-    while (_lastDriftAngle > 180.0f) _lastDriftAngle -= 360.0f;
-    while (_lastDriftAngle < -180.0f) _lastDriftAngle += 360.0f;
+                  Rotation::normalize(observedAngle), Rotation::normalize(estAngle), _lastDriftAngle);
 
     _lastDriftMagnitude = sqrtf(_lastDriftX * _lastDriftX + _lastDriftY * _lastDriftY);
 

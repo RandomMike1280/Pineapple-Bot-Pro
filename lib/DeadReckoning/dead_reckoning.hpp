@@ -2,6 +2,7 @@
 #define DEAD_RECKONING_HPP
 
 #include <Arduino.h>
+#include "../Rotation/Rotation.hpp"
 
 // ============================================================================
 // Dead-Reckoning Engine
@@ -20,7 +21,7 @@ struct PositionSnapshot {
     uint32_t timestamp_ms;   // millis() at which this snapshot was taken
     float    x;              // estimated X in mm
     float    y;              // estimated Y in mm
-    float    angle;          // estimated angle in degrees
+    Rotation angle;          // estimated angle (modulo 360)
 };
 
 class DeadReckoning {
@@ -63,7 +64,7 @@ private:
     // --- Core position state ---
     float _x;           // mm
     float _y;           // mm
-    float _angle;       // deg
+    Rotation _angle;    // modulo-360 deg
 
     // --- Distance Calibration ---
     float _distFactorH;
