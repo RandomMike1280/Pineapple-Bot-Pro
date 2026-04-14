@@ -399,17 +399,20 @@ void handleParsedMessage(const UdpMessage &msg) {
             float cx, cy, c_angle;
             deadReckoning.getCurrentPosition(cx, cy, c_angle);
 
+            // Clear existing segments to update target in real-time
+            // We don't set abortFlag here, so applyMotors() continues smoothly
+            motionQueue.abort(); 
+
             bool ok = motionQueue.enqueueWaypoint(
                 msg.target_x, msg.target_y,
                 msg.speed, msg.correctionPolicy,
                 cx, cy, c_angle
             );
             if (ok) {
-                Serial.printf("[CMD] WAYPOINT queued: target=(%.1f, %.1f) spd=%d policy=%d (queue=%d)\n",
-                    msg.target_x, msg.target_y, (int)msg.speed,
-                    (int)msg.correctionPolicy, motionQueue.remaining());
+                Serial.printf("[CMD] WAYPOINT updated: target=(%.1f, %.1f) queue reset\n",
+                    msg.target_x, msg.target_y);
             } else {
-                Serial.println("[CMD] WAYPOINT rejected — queue full!");
+                Serial.println("[CMD] WAYPOINT rejected — enqueue failed!");
             }
             break;
         }

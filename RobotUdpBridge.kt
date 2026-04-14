@@ -354,7 +354,7 @@ class RobotUdpBridge(private val port: Int = 4210) {
         // --- Move toward target (firmware angle P-controller handles small drifts) ---
         if (now - state.lastCommandTimeMs < MOVE_COMMAND_COOLDOWN_MS) return
 
-        sendFreshCommand(
+        sendCommand(
             robotId,
             "W:${"%.1f".format(state.targetXmm)}:${"%.1f".format(state.targetYmm)}:slow:live"
         )
