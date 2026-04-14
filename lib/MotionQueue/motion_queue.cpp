@@ -285,6 +285,50 @@ bool MotionQueue::enqueueRotateDuration(RotationDirection direction, uint32_t du
     return true;
 }
 
+bool MotionQueue::enqueueVelocity(float vx_mm_s, float vy_mm_s, float omega_deg_s,
+                                   uint32_t timeout_ms,
+                                   float currentX, float currentY, float currentAngle) {
+    if (_count >= MQ_MAX_SEGMENTS) return false;
+
+    // Safety: default timeout 200ms if 0
+    if (timeout_ms == 0) timeout_ms = 200;
+
+    MotionSegment &seg = _segments[_tail % MQ_MAX_SEGMENTS];
+    seg.direction       = MoveDirection::INVALID;
+    seg.distance_mm     = 0;
+    seg.speed           = SpeedLevel::NORMAL;
+    seg.correctionPolicy = CorrectionPolicy::LIVE;
+    seg.state           = SegmentState::PENDING;
+    seg.traveled_mm     = 0;
+    seg.deferred_correction_x = 0;
+    seg.deferred_correction_y = 0;
+    seg.deferred_correction_angle = 0;
+
+    seg.isDurationBased = true;
+    seg.duration_ms     = timeout_ms;
+    seg.elapsed_ms      = 0;
+
+    seg.start_x = currentX;
+    seg.start_y = currentY;
+    seg.start_angle = currentAngle;
+
+    seg.vx_mm_s    = vx_mm_s;
+    seg.vy_mm_s    = vy_mm_s;
+    seg.omega_deg_s = omega_deg_s;
+    seg.speed_mm_s  = sqrtf(vx_mm_s * vx_mm_s + vy_mm_s * vy_mm_s);
+    seg.speed_deg_s = fabsf(omega_deg_s);
+
+    // Estimate target position for telemetry
+    float dt_s = timeout_ms / 1000.0f;
+    seg.target_x = currentX + vx_mm_s * dt_s;
+    seg.target_y = currentY + vy_mm_s * dt_s;
+    seg.target_angle = currentAngle + omega_deg_s * dt_s;
+
+    _tail = (_tail + 1) % MQ_MAX_SEGMENTS;
+    _count++;
+    return true;
+}
+
 bool MotionQueue::enqueue(MoveDirection direction, uint16_t distance_mm,
                           SpeedLevel speed, CorrectionPolicy policy,
                           float currentX, float currentY, float currentAngle) {

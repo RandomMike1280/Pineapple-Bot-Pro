@@ -19,6 +19,7 @@
 //   PING      P:<timestamp_ms>
 //   PONG      Q:<orig_timestamp_ms>
 //   STATUS    S:<x>:<y>:<queue_len>:<drift_mm>
+//   VELOCITY  V:<vx_mm_s>:<vy_mm_s>:<omega_deg_s>:<timeout_ms>
 //   ABORT     A
 //   REGISTER  R:<robot_id>:<caps>
 // ============================================================================
@@ -36,6 +37,7 @@ enum class MsgType : uint8_t {
     ROTATE,
     MOVE_DURATION,
     ROTATE_DURATION,
+    VELOCITY,
     UNKNOWN
 };
 
@@ -97,6 +99,12 @@ struct UdpMessage {
     // PING/PONG fields
     uint32_t ping_timestamp;
     uint32_t remote_timestamp;  // used for clock sync during pong
+
+    // VELOCITY fields
+    float vel_vx;          // mm/s world-frame
+    float vel_vy;          // mm/s world-frame
+    float vel_omega;       // deg/s
+    // duration_ms is reused for velocity timeout
 
     // REGISTER fields
     char robot_id[8];

@@ -209,6 +209,18 @@ bool parseUdpMessage(const char *buffer, int len, UdpMessage &out) {
             out.speed != SpeedLevel::INVALID &&
             out.correctionPolicy != CorrectionPolicy::INVALID);
 
+  case 'V': { // VELOCITY — V:<vx>:<vy>:<omega>:<timeout_ms>
+    if (numTokens < 5) return false;
+    out.type = MsgType::VELOCITY;
+    float pvx = atof(tokens[1]);
+    float pvy = atof(tokens[2]);
+    out.vel_vx = pvy;   // phone Y → ESP32 X (coordinate swap)
+    out.vel_vy = pvx;   // phone X → ESP32 Y
+    out.vel_omega = atof(tokens[3]);
+    out.duration_ms = (uint32_t)strtoull(tokens[4], NULL, 10);
+    return true;
+  }
+
   case 'A': // ABORT
     out.type = MsgType::ABORT;
     return true;

@@ -464,6 +464,28 @@ void handleParsedMessage(const UdpMessage &msg) {
             break;
         }
 
+        case MsgType::VELOCITY: {
+            float cx, cy, c_angle;
+            deadReckoning.getCurrentPosition(cx, cy, c_angle);
+
+            // Abort existing queue (smooth transition — no abortFlag)
+            motionQueue.abort();
+
+            bool ok = motionQueue.enqueueVelocity(
+                msg.vel_vx, msg.vel_vy, msg.vel_omega,
+                msg.duration_ms,
+                cx, cy, c_angle
+            );
+            if (ok) {
+                Serial.printf("[CMD] VELOCITY: vx=%.1f vy=%.1f ω=%.1f timeout=%lums\n",
+                    msg.vel_vx, msg.vel_vy, msg.vel_omega,
+                    (unsigned long)msg.duration_ms);
+            } else {
+                Serial.println("[CMD] VELOCITY rejected — enqueue failed!");
+            }
+            break;
+        }
+
         case MsgType::ABORT: {
             Serial.println("[CMD] ABORT — emergency stop!");
             motionQueue.abort();

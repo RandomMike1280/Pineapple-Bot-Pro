@@ -106,6 +106,14 @@ public:
                                SpeedLevel speed, CorrectionPolicy policy,
                                float currentX, float currentY, float currentAngle);
 
+    /// Enqueue a direct velocity segment (phone-driven PID output).
+    /// The robot will move at the given world-frame velocities for up
+    /// to timeout_ms, then auto-stop.  Aborts existing queue first.
+    /// @returns true if enqueued, false if queue is full
+    bool enqueueVelocity(float vx_mm_s, float vy_mm_s, float omega_deg_s,
+                         uint32_t timeout_ms,
+                         float currentX, float currentY, float currentAngle);
+
     /// Enqueue a new rotation motion segment (absolute orientation).
     /// @returns true if enqueued, false if queue is full
     bool enqueueRotate(float target_angle,
