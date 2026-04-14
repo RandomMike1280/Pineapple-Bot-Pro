@@ -601,6 +601,8 @@ void setup() {
     motionQueue.setDistanceFactors(DISTANCE_FACTOR_H, DISTANCE_FACTOR_V);
     motionQueue.setPrecisionParameters(DECCEL_DISTANCE_MM, ROT_DECCEL_DEG, 
                                        MIN_SPEED_LIMIT_MM_S, MIN_ROT_LIMIT_DEG_S,
+                                       PRECISION_MIN_SPEED_LIMIT_MM_S, PRECISION_MIN_ROT_LIMIT_DEG_S,
+                                       CLOSE_APPROACH_DISTANCE_MM, CLOSE_ROT_APPROACH_DEG,
                                        WAYPOINT_TOLERANCE_MM, ROTATION_TOLERANCE_DEG,
                                        STABILIZATION_GAIN, MAX_STABILIZATION_OMEGA);
 

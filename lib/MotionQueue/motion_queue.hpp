@@ -77,6 +77,8 @@ public:
     /// Set precision and deceleration parameters
     void setPrecisionParameters(float deccel_dist_mm, float rot_deccel_deg, 
                                 float min_speed_mm_s, float min_rot_deg_s,
+                                float precision_min_speed_mm_s, float precision_min_rot_deg_s,
+                                float close_approach_dist_mm, float close_rot_approach_deg,
                                 float waypoint_tol_mm, float rot_tol_deg,
                                 float rot_stab_gain, float max_stab_omega);
 
@@ -183,6 +185,10 @@ private:
     float _rotDeccelDeg;
     float _minSpeedLimitMmS;
     float _minRotLimitDegS;
+    float _precisionMinSpeedLimitMmS;
+    float _precisionMinRotLimitDegS;
+    float _closeApproachDistMm;
+    float _closeRotApproachDeg;
     float _waypointToleranceMm;
     float _rotToleranceDeg;
     float _rotStabilizationGain;

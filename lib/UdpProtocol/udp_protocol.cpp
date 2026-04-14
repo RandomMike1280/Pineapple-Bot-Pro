@@ -134,16 +134,24 @@ bool parseUdpMessage(const char *buffer, int len, UdpMessage &out) {
             out.speed != SpeedLevel::INVALID &&
             out.correctionPolicy != CorrectionPolicy::INVALID);
 
-  case 'W': { // WAYPOINT — W:<target_x>:<target_y>:<target_angle>:<speed>:<policy>
-    if (numTokens < 6) return false;
+  case 'W': { // WAYPOINT — W:<x>:<y>[:<angle>]:<speed>:<policy>
+    if (numTokens < 5) return false;
     out.type = MsgType::WAYPOINT;
     float px = atof(tokens[1]);
     float py = atof(tokens[2]);
     out.target_x = py; // Swapped for robot-frame
     out.target_y = px; // Swapped for robot-frame
-    out.target_angle = atof(tokens[3]);
-    out.speed = parseSpeed(tokens[4]);
-    out.correctionPolicy = parsePolicy(tokens[5]);
+    if (numTokens >= 6) {
+      // Full form: W:<x>:<y>:<angle>:<speed>:<policy>
+      out.target_angle = atof(tokens[3]);
+      out.speed = parseSpeed(tokens[4]);
+      out.correctionPolicy = parsePolicy(tokens[5]);
+    } else {
+      // Short form: W:<x>:<y>:<speed>:<policy>  (angle defaults to 0)
+      out.target_angle = 0.0f;
+      out.speed = parseSpeed(tokens[3]);
+      out.correctionPolicy = parsePolicy(tokens[4]);
+    }
     return (out.speed != SpeedLevel::INVALID &&
             out.correctionPolicy != CorrectionPolicy::INVALID);
   }
