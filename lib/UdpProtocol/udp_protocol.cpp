@@ -134,15 +134,16 @@ bool parseUdpMessage(const char *buffer, int len, UdpMessage &out) {
             out.speed != SpeedLevel::INVALID &&
             out.correctionPolicy != CorrectionPolicy::INVALID);
 
-  case 'W': { // WAYPOINT — W:<target_x>:<target_y>:<speed>:<policy>
-    if (numTokens < 5) return false;
+  case 'W': { // WAYPOINT — W:<target_x>:<target_y>:<target_angle>:<speed>:<policy>
+    if (numTokens < 6) return false;
     out.type = MsgType::WAYPOINT;
     float px = atof(tokens[1]);
     float py = atof(tokens[2]);
-    out.target_x = py;
-    out.target_y = px;
-    out.speed = parseSpeed(tokens[3]);
-    out.correctionPolicy = parsePolicy(tokens[4]);
+    out.target_x = py; // Swapped for robot-frame
+    out.target_y = px; // Swapped for robot-frame
+    out.target_angle = atof(tokens[3]);
+    out.speed = parseSpeed(tokens[4]);
+    out.correctionPolicy = parsePolicy(tokens[5]);
     return (out.speed != SpeedLevel::INVALID &&
             out.correctionPolicy != CorrectionPolicy::INVALID);
   }
@@ -166,7 +167,7 @@ bool parseUdpMessage(const char *buffer, int len, UdpMessage &out) {
     float cy = atof(tokens[3]);
     out.cam_x = cy;
     out.cam_y = cx;
-    out.cam_angle = (numTokens >= 5) ? atof(tokens[4]) : 0.0f;
+    out.cam_angle = (numTokens >= 5) ? atof(tokens[4]) : NAN;
     return true;
   }
 
@@ -249,12 +250,12 @@ int buildPongMessage(char *buf, int maxLen, uint32_t origTimestamp) {
   return snprintf(buf, maxLen, "Q:%lu", (unsigned long)origTimestamp);
 }
 
-int buildStatusMessage(char *buf, int maxLen, float x, float y, int queueLen,
+int buildStatusMessage(char *buf, int maxLen, float x, float y, float angle, int queueLen,
                        float driftMm) {
   // Because the phone is rotated on it's side while in portrait mode,
   // The phone's XY coordinate system directly translates to YX on the robot's coordinate system. 
   // We thereby swap and negate X and Y to resolve this conflict
-  return snprintf(buf, maxLen, "S:%.1f:%.1f:%d:%.1f", y, x, queueLen, driftMm);
+  return snprintf(buf, maxLen, "S:%.1f:%.1f:%.1f:%d:%.1f", y, x, angle, queueLen, driftMm);
 }
 
 int buildRegisterMessage(char *buf, int maxLen, const char *robotId,

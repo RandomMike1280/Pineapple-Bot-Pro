@@ -19,9 +19,9 @@
 
 struct PositionSnapshot {
     uint32_t timestamp_ms;   // millis() at which this snapshot was taken
-    float    x;              // estimated X in mm
-    float    y;              // estimated Y in mm
-    Rotation angle;          // estimated angle (modulo 360)
+    float    ix;             // internal odometer X in mm
+    float    iy;             // internal odometer Y in mm
+    Rotation ia;             // internal odometer angle
 };
 
 class DeadReckoning {
@@ -35,36 +35,39 @@ public:
     void reset(float x0 = 0.0f, float y0 = 0.0f, float angle0 = 0.0f);
 
     /// Call every control-loop tick.
-    /// @param vx_mm_s      current velocity along X axis (mm/s)
-    /// @param vy_mm_s      current velocity along Y axis (mm/s)
-    /// @param omega_deg_s  current angular velocity (deg/s)
-    /// @param dt_ms        elapsed time since last call (ms)
     void update(float vx_mm_s, float vy_mm_s, float omega_deg_s, uint32_t dt_ms);
 
-    /// Look up the estimated position at a past timestamp.
-    /// Uses binary search over the history ring buffer.
-    /// Returns false if the timestamp is too old (not in buffer).
-    bool getPositionAt(uint32_t timestamp_ms, float &out_x, float &out_y, float &out_angle) const;
+    /// Look up the internal odometer state at a past timestamp.
+    bool getPositionAt(uint32_t timestamp_ms, float &out_ix, float &out_iy, float &out_ia) const;
 
-    /// Apply a smooth correction that will blend in over @p blend_ms.
-    /// The correction is the error vector (observed − estimated at the
-    /// observation time), projected forward to the present.
-    void applyCorrection(float error_x, float error_y, float error_angle, uint32_t blend_ms = 200);
+    /// Force the robot's belief to a fixed camera anchor.
+    /// The robot's current position becomes: Anchor + (CurrentOdo - OdoAtCaptureTime)
+    void setAnchor(float worldX, float worldY, float worldAngle, uint32_t captureTime);
 
-    /// Get the current best-estimate position (with any blended correction).
+    /// Get the current best-estimate position (Anchor + Delta)
     void getCurrentPosition(float &out_x, float &out_y, float &out_angle) const;
 
-    /// Raw estimated position (without active correction blend)
-    void getRawPosition(float &out_x, float &out_y, float &out_angle) const;
-
-    /// Get the current correction magnitude (for telemetry)
-    float getCorrectionMagnitude() const;
+    /// Get the pure odometer position
+    void getOdoPosition(float &out_x, float &out_y, float &out_angle) const;
 
 private:
-    // --- Core position state ---
-    float _x;           // mm
-    float _y;           // mm
-    Rotation _angle;    // modulo-360 deg
+    // --- Store 1: Internal Odometer (Continuous Integration) ---
+    float    _ix;
+    float    _iy;
+    Rotation _ia;
+
+    // --- Store 2: Global Anchor (Camera Truth) ---
+    float    _gx;
+    float    _gy;
+    Rotation _ga;
+
+    // --- Store 3: Anchor Sync (Odometer at the moment of capture) ---
+    float    _ax;
+    float    _ay;
+    Rotation _aa;
+
+    // --- Store 4: Calculated Offset (ix - ax) ---
+    // (Calculated on the fly in getCurrentPosition)
 
     // --- Distance Calibration ---
     float _distFactorH;
@@ -76,21 +79,6 @@ private:
     uint16_t         _historyCount;  // entries written (saturates at DR_HISTORY_SIZE)
 
     void _recordSnapshot(uint32_t now);
-
-    // --- Smooth correction state ---
-    float    _corrX;             // remaining correction to blend (mm)
-    float    _corrY;
-    float    _corrAngle;         // remaining correction to blend (deg)
-    float    _corrTotalX;        // original correction vector
-    float    _corrTotalY;
-    float    _corrTotalAngle;
-    uint32_t _corrStartTime;    // millis() when correction started
-    uint32_t _corrDuration;     // blend window (ms)
-    bool     _corrActive;
-
-    float _blendedCorrX() const;
-    float _blendedCorrY() const;
-    float _blendedCorrAngle() const;
 };
 
 #endif // DEAD_RECKONING_HPP

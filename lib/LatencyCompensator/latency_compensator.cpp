@@ -82,32 +82,24 @@ void LatencyCompensator::onCameraUpdate(uint32_t phoneTimestamp,
     _lastDriftX = observedX - estX;
     _lastDriftY = observedY - estY;
     
-    // shortest path difference
-    _lastDriftAngle = Rotation(observedAngle) - Rotation(estAngle);
-    
-    // Telemetry: Compare Ground Truth (Camera) vs Robot's Belief (DR history)
-    Serial.printf("[SYNC] Observed (Cam): %.1f | Estimated (DR): %.1f | Error: %.1f\n",
-                  Rotation::normalize(observedAngle), Rotation::normalize(estAngle), _lastDriftAngle);
+    // shortest path difference (only if angle is available)
+    if (!isnan(observedAngle)) {
+        _lastDriftAngle = Rotation(observedAngle) - Rotation(estAngle);
+        // Telemetry: Compare Ground Truth (Camera) vs Robot's Belief (DR history)
+        Serial.printf("[SYNC] Observed (Cam): %.1f | Estimated (DR): %.1f | Error: %.1f\n",
+                      Rotation::normalize(observedAngle), Rotation::normalize(estAngle), _lastDriftAngle);
+    } else {
+        _lastDriftAngle = 0.0f;
+        Serial.printf("[SYNC] Observed (Cam): NAN | Estimated (DR): %.1f | Error: 0.0\n",
+                      Rotation::normalize(estAngle));
+    }
 
     _lastDriftMagnitude = sqrtf(_lastDriftX * _lastDriftX + _lastDriftY * _lastDriftY);
 
-    // Step 4: Apply instant correction (History Rewriting)
-    // We trust the fixed camera as a 100% ground truth. By applying the drift
-    // instantly (blend = 0), we satisfy: Current = GroundTruth_past + (Current - Past)
-    CorrectionPolicy policy = _mq->getActivePolicy();
-
-    if (policy == CorrectionPolicy::NONE) {
-        return; // Pure dead-reckoning
-    }
-
-    if (policy == CorrectionPolicy::DEFERRED) {
-        _mq->storeDeferredCorrection(_lastDriftX, _lastDriftY, _lastDriftAngle);
-        return;
-    }
-
-    // policy == CorrectionPolicy::LIVE
-    // Apply full correction instantly to "re-ground" the robot's belief
-    _dr->applyCorrection(_lastDriftX, _lastDriftY, _lastDriftAngle, 0);
+    // Step 4: Re-ground at ALL times (Anchor-Offset model)
+    // We trust the fixed camera as a 100% ground truth. By updating the anchor
+    // instantly, we satisfy: Current = GroundTruth_past + (CurrentOdo - PastOdo)
+    _dr->setAnchor(observedX, observedY, observedAngle, captureTime);
     
     if (_lastDriftMagnitude > _emergencyThresholdMm) {
         _emergencyTriggered = true;

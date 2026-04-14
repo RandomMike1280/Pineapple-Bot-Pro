@@ -72,7 +72,7 @@ float MotionQueue::_getSpeedDegS(SpeedLevel level) const {
 // Enqueue a new motion segment
 // ============================================================================
 
-bool MotionQueue::enqueueWaypoint(float target_x, float target_y,
+bool MotionQueue::enqueueWaypoint(float target_x, float target_y, float targetAngle,
                                   SpeedLevel speed, CorrectionPolicy policy,
                                   float currentX, float currentY, float currentAngle) {
     if (_count >= MQ_MAX_SEGMENTS) return false;
@@ -100,7 +100,7 @@ bool MotionQueue::enqueueWaypoint(float target_x, float target_y,
         seg.start_angle = prev.target_angle;
     }
 
-    seg.target_angle = seg.start_angle;
+    seg.target_angle = targetAngle; // Set target angle from parameter
     seg.target_x = target_x;
     seg.target_y = target_y;
 
@@ -500,9 +500,16 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             float dy = seg.target_y - current_y;
             float dist_remaining = sqrtf(dx * dx + dy * dy);
             
-            // Reached boundary tolerance, or drifted past target
+            // Simultaneous completion check: require both position and orientation
+            float heading_err = seg.target_angle - current_angle;
+            while (heading_err > 180.0f) heading_err -= 360.0f;
+            while (heading_err < -180.0f) heading_err += 360.0f;
+
             float dot_product = (dx * seg.vx_mm_s) + (dy * seg.vy_mm_s);
-            if (dist_remaining <= _waypointToleranceMm || dot_product < 0) done = true;
+            if ((dist_remaining <= _waypointToleranceMm || dot_product < 0) &&
+                abs(heading_err) <= _rotToleranceDeg) {
+                done = true;
+            }
         }
     }
 
@@ -534,10 +541,13 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             while (angle_diff > 180.0f) angle_diff -= 360.0f;
             while (angle_diff < -180.0f) angle_diff += 360.0f;
             withinTol = (abs(angle_diff) <= _rotToleranceDeg);
-        } else {
             float dx = seg.target_x - current_x;
             float dy = seg.target_y - current_y;
-            withinTol = (sqrtf(dx * dx + dy * dy) <= _waypointToleranceMm);
+            float heading_err = seg.target_angle - current_angle;
+            while (heading_err > 180.0f) heading_err -= 360.0f;
+            while (heading_err < -180.0f) heading_err += 360.0f;
+            withinTol = (sqrtf(dx * dx + dy * dy) <= _waypointToleranceMm && 
+                         abs(heading_err) <= _rotToleranceDeg);
         }
 
         if (withinTol) {

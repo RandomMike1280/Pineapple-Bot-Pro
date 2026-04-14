@@ -124,9 +124,9 @@ int buildHelloMessage(char* buf, int maxLen, const char* robotId);
 /// Build a PONG message: "Q:<orig_timestamp>"
 int buildPongMessage(char* buf, int maxLen, uint32_t origTimestamp);
 
-/// Build a STATUS message: "S:<x>:<y>:<queue_len>:<drift>"
+/// Build a STATUS message: "S:<x>:<y>:<angle>:<queue_len>:<drift>"
 int buildStatusMessage(char* buf, int maxLen,
-                       float x, float y, int queueLen, float driftMm);
+                       float x, float y, float angle, int queueLen, float driftMm);
 
 /// Build a REGISTER message: "R:<robot_id>:<caps>"
 int buildRegisterMessage(char* buf, int maxLen,

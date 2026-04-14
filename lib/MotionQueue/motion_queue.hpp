@@ -90,7 +90,7 @@ public:
     /// Enqueue a new waypoint motion segment (absolute coordinate).
     /// @param currentX, currentY, currentAngle current estimated position
     /// @returns true if enqueued, false if queue is full
-    bool enqueueWaypoint(float target_x, float target_y,
+    bool enqueueWaypoint(float target_x, float target_y, float targetAngle,
                          SpeedLevel speed, CorrectionPolicy policy,
                          float currentX, float currentY, float currentAngle);
 

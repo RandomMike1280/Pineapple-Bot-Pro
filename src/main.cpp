@@ -149,15 +149,19 @@ MecanumSpeeds computeMecanumSpeeds(double V, double H, double A) {
     }
 
     // Kickstart: briefly boost duty to overcome static friction
+    // Damping: scale the kickstart power proportional to requested speed
     for (int i = 0; i < 4; i++) {
-        if (abs(mspeedf[i]) < DRIVE_CLAMP_LOW && abs(mspeedf[i]) > 0) {
+        double absSpeed = abs(mspeedf[i]);
+        if (absSpeed < DRIVE_CLAMP_LOW && absSpeed > 0) {
             mkickstart[i] = KICKSTART_FRAMES;
         }
         if (mkickstart[i] > 0) {
             mkickstart[i]--;
-            mspeedf[i] = sign(mspeedf[i]) * max(KICKSTART_SPEED, abs(mspeedf[i]));
-        } else if (abs(mspeedf[i]) > 0) {
-            mspeedf[i] = sign(mspeedf[i]) * max((double)DRIVE_CLAMP_LOW, abs(mspeedf[i]));
+            // Scale kickstart power between [CLAMP_LOW, KICKSTART_SPEED] based on target speed
+            double kickPower = DRIVE_CLAMP_LOW + (absSpeed / 100.0) * (KICKSTART_SPEED - DRIVE_CLAMP_LOW);
+            mspeedf[i] = sign(mspeedf[i]) * max(kickPower, absSpeed);
+        } else if (absSpeed > 0) {
+            mspeedf[i] = sign(mspeedf[i]) * max((double)DRIVE_CLAMP_LOW, absSpeed);
         }
     }
 
@@ -181,6 +185,7 @@ void applyMotors() {
     currentVx = vx;
     currentVy = vy;
     currentOmega = omega;
+    const MotionSegment* seg = motionQueue.currentSegment();
 
     bool isMoving = (vx != 0 || vy != 0 || omega != 0);
     bool rotationOnly = (omega != 0 && vx == 0 && vy == 0);
@@ -195,7 +200,7 @@ void applyMotors() {
     if (!isMoving && rotationBrakeFrames > 0 && rotationBrakeDirection != 0) {
         currentVx = 0;
         currentVy = 0;
-        currentOmega = -rotationBrakeDirection * (SPEED_FAST_DEG_S * (ROTATION_BRAKE_DUTY / 100.0f));
+        currentOmega = 0; // Decouple from dead-reckoning during the brake kick
 #ifndef TEST_MODE
         Motor1.Run(-rotationBrakeDirection * ROTATION_BRAKE_DUTY);
         Motor2.Run(-rotationBrakeDirection * ROTATION_BRAKE_DUTY);
@@ -233,6 +238,10 @@ void applyMotors() {
     motionIdleStartTime = 0;
 
     suppressRotationBrake = false;
+    // Auto-suppress brake for very short micro-refinement bursts
+    if (seg && seg->duration_ms > 0 && seg->duration_ms < 150) {
+        suppressRotationBrake = true;
+    }
     rotationBrakeFrames = 0;
     rotationBrakeDirection = 0;
 
@@ -245,7 +254,6 @@ void applyMotors() {
         if (motorRampFactor > 1.0f) motorRampFactor = 1.0f;
     }
 
-    const MotionSegment* seg = motionQueue.currentSegment();
     float cx, cy, c_angle;
     deadReckoning.getCurrentPosition(cx, cy, c_angle);
 
@@ -397,20 +405,33 @@ void handleParsedMessage(const UdpMessage &msg) {
             float cx, cy, c_angle;
             deadReckoning.getCurrentPosition(cx, cy, c_angle);
 
-            // Clear existing segments to update target in real-time
-            // We don't set abortFlag here, so applyMotors() continues smoothly
-            motionQueue.abort(); 
+            // Same-target optimization: if already heading to this destination,
+            // skip abort()+enqueue so the deceleration ramp runs uninterrupted.
+            // This eliminates the kickstart surge caused by re-launching the segment
+            // every time the phone resends the same W command at 500ms intervals.
+            const MotionSegment* cur = motionQueue.currentSegment();
+            bool sameTarget = (cur != nullptr &&
+                               !cur->isDurationBased &&
+                               cur->state == SegmentState::ACTIVE && // HOLDING must allow re-launch
+                               (cur->vx_mm_s != 0.0f || cur->vy_mm_s != 0.0f) &&
+                               fabsf(cur->target_x - msg.target_x) < 15.0f &&
+                               fabsf(cur->target_y - msg.target_y) < 15.0f);
 
-            bool ok = motionQueue.enqueueWaypoint(
-                msg.target_x, msg.target_y,
-                msg.speed, msg.correctionPolicy,
-                cx, cy, c_angle
-            );
-            if (ok) {
-                Serial.printf("[CMD] WAYPOINT updated: target=(%.1f, %.1f) queue reset\n",
-                    msg.target_x, msg.target_y);
+            if (!sameTarget) {
+                motionQueue.abort();
+                bool ok = motionQueue.enqueueWaypoint(
+                    msg.target_x, msg.target_y, msg.target_angle,
+                    msg.speed, msg.correctionPolicy,
+                    cx, cy, c_angle
+                );
+                if (ok) {
+                    Serial.printf("[CMD] WAYPOINT: (%.1f, %.1f) @ %.1f°\n",
+                        msg.target_x, msg.target_y, msg.target_angle);
+                } else {
+                    Serial.println("[CMD] WAYPOINT rejected — enqueue failed!");
+                }
             } else {
-                Serial.println("[CMD] WAYPOINT rejected — enqueue failed!");
+                Serial.printf("[CMD] WAYPOINT same target — continuing decel\n");
             }
             break;
         }
@@ -418,6 +439,9 @@ void handleParsedMessage(const UdpMessage &msg) {
         case MsgType::ROTATE: {
             float cx, cy, c_angle;
             deadReckoning.getCurrentPosition(cx, cy, c_angle);
+
+            // Clear queue for immediate rotation override
+            motionQueue.abort();
 
             bool ok = motionQueue.enqueueRotate(
                 msg.target_angle, msg.speed, msg.correctionPolicy,
@@ -507,7 +531,7 @@ void sendStatus() {
 
     char buf[64];
     int len = buildStatusMessage(buf, sizeof(buf),
-        x, y,
+        x, y, angle,
         motionQueue.remaining(),
         latencyComp.getLastDriftMagnitude()
     );
@@ -717,16 +741,6 @@ void loop() {
     deadReckoning.getCurrentPosition(current_x, current_y, current_angle);
     bool moving = motionQueue.tick(dt, current_x, current_y, current_angle);
 
-    // If a segment just completed with deferred correction, apply it now
-    if (motionQueue.segmentJustCompleted) {
-        float errX, errY, errAngle;
-        motionQueue.getDeferredCorrection(errX, errY, errAngle);
-        float errMag = sqrtf(errX * errX + errY * errY);
-        if (errMag > 2.0f || abs(errAngle) > 2.0f) {
-            Serial.printf("[MQ] Deferred correction: %.1f mm / %.1f deg\n", errMag, errAngle);
-            deadReckoning.applyCorrection(errX, errY, errAngle, CORRECTION_BLEND_MS);
-        }
-    }
 
     // ---- Handle emergency deceleration ----
     if (latencyComp.wasEmergencyTriggered() && moving) {

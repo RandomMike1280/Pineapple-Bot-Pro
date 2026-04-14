@@ -44,7 +44,7 @@
 // Diagnostics & Safety
 // ============================================================================
 #define ENABLE_DEBUG_LOGGING     0        // Set to 1 to enable detailed serial logs
-#define DRIVE_CLAMP_LOW          30       // Minimum duty to consider a motor "moving"
+#define DRIVE_CLAMP_LOW          57       // Minimum duty to consider a motor "moving"
 #define DRIVE_CLAMP_HIGH         100      // Maximum allowable duty (safety cap)
 
 // Motor mapping constants
@@ -70,12 +70,12 @@
 // ============================================================================
 // Precision & Deceleration
 // ============================================================================
-#define DECCEL_DISTANCE_MM       80.0f    // Start slowing down at this distance
-#define ROT_DECCEL_DEG           30.0f    // Start slowing down rotation at this angle
-#define MIN_SPEED_LIMIT_MM_S     25.0f    // Floor speed during deccel (prevent stall)
-#define MIN_ROT_LIMIT_DEG_S      5.0f     // Floor rotation during deccel
+#define DECCEL_DISTANCE_MM       350.0f   // Start slowing down at this distance (CNC-style long decel)
+#define ROT_DECCEL_DEG           15.0f    // Start slowing down rotation at this angle
+#define MIN_SPEED_LIMIT_MM_S     5.0f    // Floor speed during deccel (prevent stall)
+#define MIN_ROT_LIMIT_DEG_S      2.5f     // Floor rotation during deccel
 #define WAYPOINT_TOLERANCE_MM    5.0f     // Tighten tolerance for arrival
-#define ROTATION_TOLERANCE_DEG   2.2f
+#define ROTATION_TOLERANCE_DEG   1.5f
 
 // ============================================================================
 // Active Heading Stabilization (Holonomic Control)
@@ -83,8 +83,8 @@
 // These constants define how the robot corrects its heading while moving.
 // Increase the gain if the robot is "lazy" about correcting drift.
 // Decrease the gain if the robot "oscillates" or shakes while strafing.
-#define STABILIZATION_GAIN       1.0f     // Corrective OMEGA per degree of error
-#define MAX_STABILIZATION_OMEGA  10.0f    // Max deg/s allowed for in-move correction
+#define STABILIZATION_GAIN       2.5f     // Corrective OMEGA per degree of error
+#define MAX_STABILIZATION_OMEGA  35.0f    // Max deg/s allowed for in-move correction
 
 // ============================================================================
 // Timing Constants
@@ -111,13 +111,13 @@
 // Convention: V > 0 = forward, H > 0 = right, A > 0 = CW rotation
 
 // Motor stop threshold — below this duty, motors stall
-#define MOTOR_STOP_THRESHOLD    30
+#define MOTOR_STOP_THRESHOLD    35
 
 // Kickstart: briefly boost duty to overcome static friction
 #define KICKSTART_FRAMES        3
 #define KICKSTART_SPEED         70.0
-#define ROTATION_BRAKE_FRAMES   4
-#define ROTATION_BRAKE_DUTY     50
+#define ROTATION_BRAKE_FRAMES   5
+#define ROTATION_BRAKE_DUTY     75
 #define ROTATION_BRAKE_MIN_OMEGA_DEG_S 5.0f
 
 // Acceleration ramp: gradually increase motor duty at segment start
