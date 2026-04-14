@@ -88,6 +88,8 @@ static float lastRotationOmegaDegS = 0;
 static int rotationBrakeFrames = 0;
 static int rotationBrakeDirection = 0;
 static bool suppressRotationBrake = false;
+static uint32_t motionIdleStartTime = 0;
+static const uint32_t motionCommandGapHoldMs = 40;
 static const float rampIncrement =
     (1.0f - RAMP_START_FRACTION) / (RAMP_DURATION_MS / (float)CONTROL_LOOP_INTERVAL_MS);
 
@@ -100,6 +102,7 @@ static void resetMotionControlState(bool suppressBrake) {
     rotationBrakeDirection = 0;
     suppressRotationBrake = suppressBrake;
     rearmKickstart();
+    motionIdleStartTime = 0;
 }
 
 int sign(double x) {
@@ -170,6 +173,9 @@ MecanumSpeeds computeMecanumSpeeds(double V, double H, double A) {
 // ============================================================================
 void applyMotors() {
     // Acceleration ramp state — persists across calls
+    float prevCurrentVx = currentVx;
+    float prevCurrentVy = currentVy;
+    float prevCurrentOmega = currentOmega;
     float vx, vy, omega;
     motionQueue.getCurrentVelocity(vx, vy, omega);
     currentVx = vx;
@@ -204,24 +210,27 @@ void applyMotors() {
     }
 
     if (!isMoving) {
-        // No active segment — stop motors and reset ramp after 50ms of inactivity
+        if (motionIdleStartTime == 0) motionIdleStartTime = millis();
+        if (motorWasMoving && (millis() - motionIdleStartTime) <= motionCommandGapHoldMs) {
+            currentVx = prevCurrentVx;
+            currentVy = prevCurrentVy;
+            currentOmega = prevCurrentOmega;
+            return;
+        }
+
         #ifndef TEST_MODE
         Motor1.Stop();
         Motor2.Stop();
         Motor3.Stop();
         Motor4.Stop();
         #endif
-        
-        static uint32_t stopStartTime = 0;
-        if (stopStartTime == 0) stopStartTime = millis();
-        if (millis() - stopStartTime > 50) {
+
+        if (millis() - motionIdleStartTime > 50) {
             resetMotionControlState(false);
         }
         return;
     }
-    static uint32_t stopStartTime = 0; // reset local static
-    stopStartTime = 0;
-
+    motionIdleStartTime = 0;
 
     suppressRotationBrake = false;
     rotationBrakeFrames = 0;
@@ -721,13 +730,7 @@ void loop() {
 
     // ---- Handle emergency deceleration ----
     if (latencyComp.wasEmergencyTriggered() && moving) {
-#ifndef TEST_MODE
-        Motor1.Stop();
-        Motor2.Stop();
-        Motor3.Stop();
-        Motor4.Stop();
-#endif
-        delay(50);
+        Serial.println("[LC] Emergency correction triggered — continuing with corrected state");
     }
 
     // ---- Apply motor speeds ----
