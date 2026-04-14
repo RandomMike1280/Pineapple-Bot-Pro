@@ -71,11 +71,11 @@
 // Precision & Deceleration
 // ============================================================================
 #define DECCEL_DISTANCE_MM       80.0f    // Start slowing down at this distance
-#define ROT_DECCEL_DEG           45.0f    // Start slowing down rotation at this angle
+#define ROT_DECCEL_DEG           12.0f    // Start slowing down rotation at this angle
 #define MIN_SPEED_LIMIT_MM_S     25.0f    // Floor speed during deccel (prevent stall)
 #define MIN_ROT_LIMIT_DEG_S      5.0f     // Floor rotation during deccel
 #define WAYPOINT_TOLERANCE_MM    5.0f     // Tighten tolerance for arrival
-#define ROTATION_TOLERANCE_DEG   3.5f
+#define ROTATION_TOLERANCE_DEG   2.2f
 
 // ============================================================================
 // Active Heading Stabilization (Holonomic Control)
@@ -83,7 +83,7 @@
 // These constants define how the robot corrects its heading while moving.
 // Increase the gain if the robot is "lazy" about correcting drift.
 // Decrease the gain if the robot "oscillates" or shakes while strafing.
-#define STABILIZATION_GAIN       1.2f     // Corrective OMEGA per degree of error
+#define STABILIZATION_GAIN       1.0f     // Corrective OMEGA per degree of error
 #define MAX_STABILIZATION_OMEGA  10.0f    // Max deg/s allowed for in-move correction
 
 // ============================================================================

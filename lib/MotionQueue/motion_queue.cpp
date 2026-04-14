@@ -389,9 +389,9 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             while (angle_diff < -180.0f) angle_diff += 360.0f;
             float abs_diff = abs(angle_diff);
 
-            // Calculate deceleration scale
+            // Calculate deceleration scale using square root curve (stays fast longer)
             if (abs_diff < _rotDeccelDeg) {
-                speed_scale = abs_diff / _rotDeccelDeg;
+                speed_scale = sqrtf(abs_diff / _rotDeccelDeg);
                 // Clamp to minimum speed to avoid stall
                 float min_scale = _minRotLimitDegS / seg.speed_deg_s;
                 if (speed_scale < min_scale) speed_scale = min_scale;
