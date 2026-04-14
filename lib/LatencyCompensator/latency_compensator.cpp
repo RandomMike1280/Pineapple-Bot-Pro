@@ -82,47 +82,39 @@ void LatencyCompensator::onCameraUpdate(uint32_t phoneTimestamp,
     _lastDriftY = observedY - estY;
     _lastDriftAngle = observedAngle - estAngle;
     
+    // Telemetry: Compare Ground Truth (Camera) vs Robot's Belief (DR history)
+    Serial.printf("[SYNC] Observed (Cam): %.1f | Estimated (DR): %.1f | Error: %.1f\n",
+                  observedAngle, estAngle, _lastDriftAngle);
+    
     // Normalize angle error to [-180, 180]
     while (_lastDriftAngle > 180.0f) _lastDriftAngle -= 360.0f;
     while (_lastDriftAngle < -180.0f) _lastDriftAngle += 360.0f;
 
     _lastDriftMagnitude = sqrtf(_lastDriftX * _lastDriftX + _lastDriftY * _lastDriftY);
 
-    // Step 4: Apply correction based on the active segment's policy
+    // Step 4: Apply instant correction (History Rewriting)
+    // We trust the fixed camera as a 100% ground truth. By applying the drift
+    // instantly (blend = 0), we satisfy: Current = GroundTruth_past + (Current - Past)
     CorrectionPolicy policy = _mq->getActivePolicy();
 
     if (policy == CorrectionPolicy::NONE) {
-        // Pure dead-reckoning — ignore camera data
-        return;
+        return; // Pure dead-reckoning
     }
 
     if (policy == CorrectionPolicy::DEFERRED) {
-        // Store the correction for application at segment boundary
         _mq->storeDeferredCorrection(_lastDriftX, _lastDriftY, _lastDriftAngle);
         return;
     }
 
     // policy == CorrectionPolicy::LIVE
-    if (_lastDriftMagnitude < 2.0f) {
-        // Drift is negligible — don't bother correcting
-        return;
-    }
-
+    // Apply full correction instantly to "re-ground" the robot's belief
+    _dr->applyCorrection(_lastDriftX, _lastDriftY, _lastDriftAngle, 0);
+    
     if (_lastDriftMagnitude > _emergencyThresholdMm) {
-        // Emergency! Drift is dangerously large.
-        // Signal that the motion queue should decelerate briefly.
         _emergencyTriggered = true;
-        Serial.printf("[LC] EMERGENCY drift: %.1f mm — decelerating\n", _lastDriftMagnitude);
-        // Apply immediate correction with shorter blend
-        _dr->applyCorrection(_lastDriftX, _lastDriftY, _lastDriftAngle, correctionBlendMs / 2);
-    } else if (_lastDriftMagnitude > _driftThresholdMm || abs(_lastDriftAngle) > 2.0f) {
-        // Significant drift — apply full correction
-        Serial.printf("[LC] Correcting drift: %.1f mm / %.1f deg (err: %.1f, %.1f)\n",
-                      _lastDriftMagnitude, _lastDriftAngle, _lastDriftX, _lastDriftY);
-        _dr->applyCorrection(_lastDriftX, _lastDriftY, _lastDriftAngle, correctionBlendMs);
+        Serial.printf("[LC] RE-GROUNDED (EMERGENCY): %.1f mm / %.1f deg\n", _lastDriftMagnitude, _lastDriftAngle);
     } else {
-        // Minor drift — apply gentle partial correction (50%)
-        _dr->applyCorrection(_lastDriftX * 0.5f, _lastDriftY * 0.5f, _lastDriftAngle * 0.5f, correctionBlendMs);
+        Serial.printf("[LC] RE-GROUNDED: %.1f mm / %.1f deg\n", _lastDriftMagnitude, _lastDriftAngle);
     }
 }
 

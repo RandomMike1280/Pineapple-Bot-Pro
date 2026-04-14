@@ -71,7 +71,7 @@
 // Precision & Deceleration
 // ============================================================================
 #define DECCEL_DISTANCE_MM       80.0f    // Start slowing down at this distance
-#define ROT_DECCEL_DEG           12.0f    // Start slowing down rotation at this angle
+#define ROT_DECCEL_DEG           30.0f    // Start slowing down rotation at this angle
 #define MIN_SPEED_LIMIT_MM_S     25.0f    // Floor speed during deccel (prevent stall)
 #define MIN_ROT_LIMIT_DEG_S      5.0f     // Floor rotation during deccel
 #define WAYPOINT_TOLERANCE_MM    5.0f     // Tighten tolerance for arrival
@@ -116,9 +116,9 @@
 // Kickstart: briefly boost duty to overcome static friction
 #define KICKSTART_FRAMES        3
 #define KICKSTART_SPEED         70.0
-#define ROTATION_BRAKE_FRAMES   2
-#define ROTATION_BRAKE_DUTY     35
-#define ROTATION_BRAKE_MIN_OMEGA_DEG_S 70.0f
+#define ROTATION_BRAKE_FRAMES   4
+#define ROTATION_BRAKE_DUTY     45
+#define ROTATION_BRAKE_MIN_OMEGA_DEG_S 5.0f
 
 // Acceleration ramp: gradually increase motor duty at segment start
 // to synchronize wheel engagement and reduce drift from motor timing mismatch.
