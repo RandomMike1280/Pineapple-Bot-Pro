@@ -124,9 +124,11 @@ int buildHelloMessage(char* buf, int maxLen, const char* robotId);
 /// Build a PONG message: "Q:<orig_timestamp>"
 int buildPongMessage(char* buf, int maxLen, uint32_t origTimestamp);
 
-/// Build a STATUS message: "S:<x>:<y>:<angle>:<queue_len>:<drift>"
+/// Build a STATUS message: "S:<y>:<x>:<angle>:<queue_len>:<drift>:<vy>:<vx>"
+/// Note: x/y and vx/vy are swapped to match phone's rotated coordinate system
 int buildStatusMessage(char* buf, int maxLen,
-                       float x, float y, float angle, int queueLen, float driftMm);
+                       float x, float y, float angle, int queueLen, float driftMm,
+                       float vx, float vy);
 
 /// Build a REGISTER message: "R:<robot_id>:<caps>"
 int buildRegisterMessage(char* buf, int maxLen,

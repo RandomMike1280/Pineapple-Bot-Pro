@@ -91,6 +91,14 @@
 #define MAX_STABILIZATION_OMEGA  35.0f    // Max deg/s allowed for in-move correction
 
 // ============================================================================
+// Predictive Steering — anticipate drift/momentum using observed velocity
+// ============================================================================
+// The robot tracks its own velocity from position deltas, predicts where it
+// will be in LOOKAHEAD seconds, and steers toward the target from there.
+// This compensates for momentum/drift before it becomes a large error.
+#define PREDICTIVE_LOOKAHEAD_S   0.15f    // seconds to predict ahead (0.15s ≈ 11mm at fast speed)
+
+// ============================================================================
 // Timing Constants
 // ============================================================================
 #define STATUS_INTERVAL_MS       100      // telemetry broadcast interval

@@ -82,6 +82,12 @@ public:
                                 float waypoint_tol_mm, float rot_tol_deg,
                                 float rot_stab_gain, float max_stab_omega);
 
+    /// Set predictive steering parameters
+    void setPredictiveParameters(float lookahead_time_s);
+
+    /// Get the EMA-smoothed observed velocity (mm/s)
+    void getEstimatedVelocity(float &vx, float &vy) const;
+
     /// Enqueue a new motion segment.
     /// @param currentX, currentY, currentAngle current estimated position
     /// @returns true if enqueued, false if queue is full
@@ -194,9 +200,17 @@ private:
     float _rotStabilizationGain;
     float _maxStabilizationOmega;
 
+    // Velocity tracking for predictive steering
+    float _prevPoseX, _prevPoseY;
+    bool  _hasPreviousPose;
+    float _estVx, _estVy;           // EMA-smoothed observed velocity (mm/s)
+    float _lookaheadTimeS;           // how far ahead to predict (seconds)
+    uint32_t _tickTimeMs;            // monotonic tick timer
+
     float _getSpeedMmS(SpeedLevel level) const;
     float _getSpeedDegS(SpeedLevel level) const;
     void  _advanceToNext();
+    void  _updateVelocityEstimate(float x, float y, float dt_s);
 };
 
 #endif // MOTION_QUEUE_HPP
