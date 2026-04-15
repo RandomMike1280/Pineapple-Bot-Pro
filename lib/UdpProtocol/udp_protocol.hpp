@@ -38,6 +38,7 @@ enum class MsgType : uint8_t {
     MOVE_DURATION,
     ROTATE_DURATION,
     VELOCITY,
+    DONE,
     UNKNOWN
 };
 

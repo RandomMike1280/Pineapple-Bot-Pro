@@ -44,6 +44,8 @@ uint32_t lastTick       = 0;
 uint32_t lastHelloTime  = 0;
 uint32_t lastStatusTime = 0;
 uint32_t lastPingTime   = 0;
+static int doneFeedbackBlinks = 0;
+static uint32_t lastFeedbackToggleTime = 0;
 
 // ============================================================================
 // Latency / Correction Tuning
@@ -536,6 +538,12 @@ void handleParsedMessage(const UdpMessage &msg) {
             break;
         }
 
+        case MsgType::DONE: {
+            Serial.println("[CMD] MISSION DONE!");
+            doneFeedbackBlinks = 4; // 2 full blinks (On-Off-On-Off)
+            break;
+        }
+
         case MsgType::ROTATE: {
             float cx, cy, c_angle;
             deadReckoning.getCurrentPosition(cx, cy, c_angle);
@@ -699,6 +707,9 @@ void setup() {
     deadReckoning.setDistanceFactors(DISTANCE_FACTOR_H, DISTANCE_FACTOR_V);
 
     initServoControl();
+    
+    pinMode(LED, OUTPUT);
+    digitalWrite(LED, LOW);
 
     Motor1.Reverse();
     Motor2.Reverse();
@@ -910,6 +921,16 @@ void loop() {
         lastLedBlinkTime = now;
         ledState = !ledState;
         ledcWrite(7, ledState ? 2048 : 0);
+    }
+#else
+    // Creative feedback blinking for DONE command
+    if (doneFeedbackBlinks > 0) {
+        if (now - lastFeedbackToggleTime >= 100) {
+            lastFeedbackToggleTime = now;
+            bool state = (doneFeedbackBlinks % 2 != 0);
+            digitalWrite(LED, state ? HIGH : LOW);
+            doneFeedbackBlinks--;
+        }
     }
 #endif
 }

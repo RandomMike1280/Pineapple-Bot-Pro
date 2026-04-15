@@ -264,6 +264,10 @@ bool parseUdpMessage(const char *buffer, int len, UdpMessage &out) {
     strncpy(out.robot_id, tokens[1], sizeof(out.robot_id) - 1);
     return true;
 
+  case 'X': // DONE — X[:<status>]
+    out.type = MsgType::DONE;
+    return true;
+
   default:
     return false;
   }
