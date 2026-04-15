@@ -44,7 +44,7 @@
 // Diagnostics & Safety
 // ============================================================================
 #define ENABLE_DEBUG_LOGGING     0        // Set to 1 to enable detailed serial logs
-#define DRIVE_CLAMP_LOW          57       // Minimum duty to consider a motor "moving"
+#define DRIVE_CLAMP_LOW          65       // Minimum duty to overcome static friction
 #define DRIVE_CLAMP_HIGH         100      // Maximum allowable duty (safety cap)
 
 // Motor mapping constants
@@ -72,8 +72,12 @@
 // ============================================================================
 #define DECCEL_DISTANCE_MM       350.0f   // Start slowing down at this distance (CNC-style long decel)
 #define ROT_DECCEL_DEG           15.0f    // Start slowing down rotation at this angle
-#define MIN_SPEED_LIMIT_MM_S     5.0f    // Floor speed during deccel (prevent stall)
-#define MIN_ROT_LIMIT_DEG_S      2.5f     // Floor rotation during deccel
+#define MIN_SPEED_LIMIT_MM_S     10.0f    // Floor speed during deccel (prevent stall)
+#define MIN_ROT_LIMIT_DEG_S      5.0f     // Floor rotation during deccel
+#define PRECISION_MIN_SPEED_LIMIT_MM_S 12.0f
+#define PRECISION_MIN_ROT_LIMIT_DEG_S  5.0f
+#define CLOSE_APPROACH_DISTANCE_MM     80.0f
+#define CLOSE_ROT_APPROACH_DEG         8.0f
 #define WAYPOINT_TOLERANCE_MM    5.0f     // Tighten tolerance for arrival
 #define ROTATION_TOLERANCE_DEG   1.5f
 
@@ -85,6 +89,14 @@
 // Decrease the gain if the robot "oscillates" or shakes while strafing.
 #define STABILIZATION_GAIN       2.5f     // Corrective OMEGA per degree of error
 #define MAX_STABILIZATION_OMEGA  35.0f    // Max deg/s allowed for in-move correction
+
+// ============================================================================
+// Predictive Steering — anticipate drift/momentum using observed velocity
+// ============================================================================
+// The robot tracks its own velocity from position deltas, predicts where it
+// will be in LOOKAHEAD seconds, and steers toward the target from there.
+// This compensates for momentum/drift before it becomes a large error.
+#define PREDICTIVE_LOOKAHEAD_S   0.15f    // seconds to predict ahead (0.15s ≈ 11mm at fast speed)
 
 // ============================================================================
 // Timing Constants

@@ -1,4 +1,5 @@
 #include "motion_queue.hpp"
+#include <math.h>
 
 // ============================================================================
 // Construction
@@ -13,8 +14,12 @@ MotionQueue::MotionQueue()
       _currentVx(0), _currentVy(0), _currentOmega(0),
       _deccelDistMm(150.0f), _rotDeccelDeg(25.0f),
       _minSpeedLimitMmS(25.0f), _minRotLimitDegS(25.0f),
+      _precisionMinSpeedLimitMmS(10.0f), _precisionMinRotLimitDegS(4.0f),
+      _closeApproachDistMm(80.0f), _closeRotApproachDeg(8.0f),
       _waypointToleranceMm(12.0f), _rotToleranceDeg(2.0f),
       _rotStabilizationGain(1.5f), _maxStabilizationOmega(35.0f),
+      _prevPoseX(0), _prevPoseY(0), _hasPreviousPose(false),
+      _estVx(0), _estVy(0), _lookaheadTimeS(0.15f), _tickTimeMs(0),
       segmentJustCompleted(false)
 {
 }
@@ -38,16 +43,56 @@ void MotionQueue::setDistanceFactors(float factor_h, float factor_v) {
 
 void MotionQueue::setPrecisionParameters(float deccel_dist_mm, float rot_deccel_deg, 
                                           float min_speed_mm_s, float min_rot_deg_s,
+                                          float precision_min_speed_mm_s, float precision_min_rot_deg_s,
+                                          float close_approach_dist_mm, float close_rot_approach_deg,
                                           float waypoint_tol_mm, float rot_tol_deg,
                                           float rot_stab_gain, float max_stab_omega) {
     _deccelDistMm = deccel_dist_mm;
     _rotDeccelDeg = rot_deccel_deg;
     _minSpeedLimitMmS = min_speed_mm_s;
     _minRotLimitDegS = min_rot_deg_s;
+    _precisionMinSpeedLimitMmS = precision_min_speed_mm_s;
+    _precisionMinRotLimitDegS = precision_min_rot_deg_s;
+    _closeApproachDistMm = close_approach_dist_mm;
+    _closeRotApproachDeg = close_rot_approach_deg;
     _waypointToleranceMm = waypoint_tol_mm;
     _rotToleranceDeg = rot_tol_deg;
     _rotStabilizationGain = rot_stab_gain;
     _maxStabilizationOmega = max_stab_omega;
+}
+
+void MotionQueue::setPredictiveParameters(float lookahead_time_s) {
+    _lookaheadTimeS = lookahead_time_s;
+}
+
+void MotionQueue::getEstimatedVelocity(float &vx, float &vy) const {
+    vx = _estVx;
+    vy = _estVy;
+}
+
+void MotionQueue::_updateVelocityEstimate(float x, float y, float dt_s) {
+    if (!_hasPreviousPose) {
+        _prevPoseX = x;
+        _prevPoseY = y;
+        _hasPreviousPose = true;
+        return;
+    }
+    if (dt_s < 0.001f) return;
+
+    float inst_vx = (x - _prevPoseX) / dt_s;
+    float inst_vy = (y - _prevPoseY) / dt_s;
+    _prevPoseX = x;
+    _prevPoseY = y;
+
+    // Reject outlier spikes from camera correction jumps
+    float inst_speed = sqrtf(inst_vx * inst_vx + inst_vy * inst_vy);
+    float max_plausible = _speedFast * 3.0f;
+    if (inst_speed > max_plausible) return;
+
+    // EMA smoothing (alpha ≈ 0.12 → effective window ~40ms at 5ms ticks)
+    const float alpha = 0.12f;
+    _estVx = _estVx * (1.0f - alpha) + inst_vx * alpha;
+    _estVy = _estVy * (1.0f - alpha) + inst_vy * alpha;
 }
 
 float MotionQueue::_getSpeedMmS(SpeedLevel level) const {
@@ -127,7 +172,6 @@ bool MotionQueue::enqueueWaypoint(float target_x, float target_y, float targetAn
     _count++;
     return true;
 }
-// ============================================================================
 
 bool MotionQueue::enqueueRotate(float target_angle,
                                   SpeedLevel speed, CorrectionPolicy policy,
@@ -143,6 +187,7 @@ bool MotionQueue::enqueueRotate(float target_angle,
     seg.isDurationBased = false;
     seg.deferred_correction_x = 0;
     seg.deferred_correction_y = 0;
+    seg.deferred_correction_angle = 0;
 
     if (_count == 0) {
         seg.start_x = currentX;
@@ -344,6 +389,7 @@ bool MotionQueue::enqueue(MoveDirection direction, uint16_t distance_mm,
     seg.isDurationBased = false;
     seg.deferred_correction_x = 0;
     seg.deferred_correction_y = 0;
+    seg.deferred_correction_angle = 0;
 
     // Compute velocity vector
     float dirX, dirY;
@@ -383,6 +429,11 @@ bool MotionQueue::enqueue(MoveDirection direction, uint16_t distance_mm,
 
 bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float current_angle) {
     segmentJustCompleted = false;
+    _tickTimeMs += dt_ms;
+    float dt_s = dt_ms / 1000.0f;
+
+    // Update velocity estimate from observed position every tick
+    _updateVelocityEstimate(current_x, current_y, dt_s);
 
     if (_count == 0) {
         _currentVx = _currentVy = _currentOmega = 0;
@@ -404,8 +455,6 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
     }
 
     // Integrate distance traveled
-    float dt_s = dt_ms / 1000.0f;
-    
     // Use current velocity for theoretical distance integration
     float displacement = 0;
     if (seg.speed_deg_s > 0 && seg.vx_mm_s == 0 && seg.vy_mm_s == 0) {
@@ -431,32 +480,85 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             float angle_diff = seg.target_angle - current_angle;
             while (angle_diff > 180.0f) angle_diff -= 360.0f;
             while (angle_diff < -180.0f) angle_diff += 360.0f;
-            float abs_diff = abs(angle_diff);
+            float abs_diff = fabsf(angle_diff);
+            speed_scale = 1.0f;
 
-            // Calculate deceleration scale using square root curve (stays fast longer)
-            if (abs_diff < _rotDeccelDeg) {
-                speed_scale = sqrtf(abs_diff / _rotDeccelDeg);
-                // Clamp to minimum speed to avoid stall
-                float min_scale = _minRotLimitDegS / seg.speed_deg_s;
-                if (speed_scale < min_scale) speed_scale = min_scale;
+            if (abs_diff <= _rotToleranceDeg) {
+                speed_scale = 0.0f;
+            } else {
+                if (_rotDeccelDeg > 0.001f && abs_diff < _rotDeccelDeg) {
+                    float normalized = abs_diff / _rotDeccelDeg;
+                    speed_scale = cbrtf(normalized);
+                }
+
+                if (_closeRotApproachDeg > 0.001f && abs_diff < _closeRotApproachDeg) {
+                    float close_norm = abs_diff / _closeRotApproachDeg;
+                    float close_scale = close_norm * close_norm;
+                    if (close_scale < speed_scale) speed_scale = close_scale;
+                    if (seg.speed_deg_s > 0.001f) {
+                        float precision_min_scale = _precisionMinRotLimitDegS / seg.speed_deg_s;
+                        if (speed_scale < precision_min_scale) speed_scale = precision_min_scale;
+                    }
+                } else if (seg.speed_deg_s > 0.001f) {
+                    float min_scale = _minRotLimitDegS / seg.speed_deg_s;
+                    if (speed_scale < min_scale) speed_scale = min_scale;
+                }
+
+                if (_count > 1) speed_scale = 1.0f;
             }
-
-            // Only decelerate if this is the last rotation or next isn't also a rotation
-            if (_count > 1) speed_scale = 1.0f; 
 
             _currentVx = 0;
             _currentVy = 0;
-            _currentOmega = (angle_diff > 0 ? seg.speed_deg_s : -seg.speed_deg_s) * speed_scale;
+            _currentOmega = (abs_diff <= _rotToleranceDeg)
+                ? 0.0f
+                : (angle_diff > 0 ? seg.speed_deg_s : -seg.speed_deg_s) * speed_scale;
         } else {
             float dx = seg.target_x - current_x;
             float dy = seg.target_y - current_y;
             float dist_remaining = sqrtf(dx * dx + dy * dy);
+            float heading_err = seg.target_angle - current_angle;
+            while (heading_err > 180.0f) heading_err -= 360.0f;
+            while (heading_err < -180.0f) heading_err += 360.0f;
+            float abs_heading_err = fabsf(heading_err);
+            float speed_scale = 1.0f;
 
-            // Calculate deceleration scale
-            if (dist_remaining < _deccelDistMm) {
-                speed_scale = dist_remaining / _deccelDistMm;
-                float min_scale = _minSpeedLimitMmS / seg.speed_mm_s;
-                if (speed_scale < min_scale) speed_scale = min_scale;
+            if (dist_remaining <= _waypointToleranceMm) {
+                speed_scale = 0.0f;
+            } else {
+                if (_deccelDistMm > 0.001f && dist_remaining < _deccelDistMm) {
+                    float normalized = dist_remaining / _deccelDistMm;
+                    speed_scale = cbrtf(normalized);
+                }
+
+                if (_closeApproachDistMm > 0.001f && dist_remaining < _closeApproachDistMm) {
+                    float close_norm = dist_remaining / _closeApproachDistMm;
+                    float close_scale = close_norm * close_norm;
+                    if (close_scale < speed_scale) speed_scale = close_scale;
+
+                    float heading_window = (_closeRotApproachDeg > _rotToleranceDeg)
+                        ? (_closeRotApproachDeg * 2.0f)
+                        : (_rotToleranceDeg * 4.0f);
+                    if (heading_window > 0.001f) {
+                        float heading_scale = 1.0f - (abs_heading_err / heading_window);
+                        if (heading_scale < 0.35f) heading_scale = 0.35f;
+                        if (heading_scale > 1.0f) heading_scale = 1.0f;
+                        speed_scale *= heading_scale;
+                    }
+
+                    // Re-enforce precision min floor AFTER heading reduction
+                    if (seg.speed_mm_s > 0.001f) {
+                        float precision_min_scale = _precisionMinSpeedLimitMmS / seg.speed_mm_s;
+                        if (speed_scale < precision_min_scale) speed_scale = precision_min_scale;
+                    }
+                } else if (seg.speed_mm_s > 0.001f) {
+                    float min_scale = _minSpeedLimitMmS / seg.speed_mm_s;
+                    if (speed_scale < min_scale) speed_scale = min_scale;
+                }
+
+                if (dist_remaining <= (_waypointToleranceMm * 2.0f) &&
+                    abs_heading_err > (_rotToleranceDeg * 1.25f)) {
+                    speed_scale = 0.0f;
+                }
             }
 
             // Don't decelerate if another translation segment is waiting (seamless chaining)
@@ -467,21 +569,50 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
                 }
             }
 
-            _currentVx = (dx / dist_remaining) * seg.speed_mm_s * speed_scale;
-            _currentVy = (dy / dist_remaining) * seg.speed_mm_s * speed_scale;
-            
+            // --- Predictive steering: aim from predicted future position ---
+            float aim_dx = dx;
+            float aim_dy = dy;
+            if (_lookaheadTimeS > 0.001f && dist_remaining > _waypointToleranceMm) {
+                // Scale lookahead down in close-approach zone to avoid oscillation
+                float effective_lookahead = _lookaheadTimeS;
+                if (_closeApproachDistMm > 0.001f && dist_remaining < _closeApproachDistMm) {
+                    effective_lookahead *= dist_remaining / _closeApproachDistMm;
+                }
+                // Predict where we'll be, aim from there to target
+                float pred_x = current_x + _estVx * effective_lookahead;
+                float pred_y = current_y + _estVy * effective_lookahead;
+                aim_dx = seg.target_x - pred_x;
+                aim_dy = seg.target_y - pred_y;
+            }
+            float aim_dist = sqrtf(aim_dx * aim_dx + aim_dy * aim_dy);
+            float aim_inv = (aim_dist > 0.001f) ? (1.0f / aim_dist) : 0.0f;
+            _currentVx = aim_dx * aim_inv * seg.speed_mm_s * speed_scale;
+            _currentVy = aim_dy * aim_inv * seg.speed_mm_s * speed_scale;
+
             // --- Active Heading Stabilization ---
             // Calculate error between actual heading and segment's target angle
-            float heading_err = seg.target_angle - current_angle;
-            while (heading_err > 180.0f) heading_err -= 360.0f;
-            while (heading_err < -180.0f) heading_err += 360.0f;
+            float stabilization_gain = _rotStabilizationGain;
+            if (_closeApproachDistMm > 0.001f && dist_remaining < _closeApproachDistMm) {
+                float close_mix = 1.0f - (dist_remaining / _closeApproachDistMm);
+                if (close_mix < 0.0f) close_mix = 0.0f;
+                if (close_mix > 1.0f) close_mix = 1.0f;
+                stabilization_gain *= 1.0f + (0.5f * close_mix);
+            }
 
-            // Apply proportional stabilization
-            _currentOmega = heading_err * _rotStabilizationGain;
+            _currentOmega = heading_err * stabilization_gain;
 
             // Clamp stabilization power to prevent violent shakes
             if (_currentOmega > _maxStabilizationOmega) _currentOmega = _maxStabilizationOmega;
             if (_currentOmega < -_maxStabilizationOmega) _currentOmega = -_maxStabilizationOmega;
+
+            // Anti-stall: if translation speed is non-zero but below the precision
+            // minimum, boost it so motors can overcome static friction
+            float cmdSpd = sqrtf(_currentVx * _currentVx + _currentVy * _currentVy);
+            if (cmdSpd > 0.001f && cmdSpd < _precisionMinSpeedLimitMmS) {
+                float boost = _precisionMinSpeedLimitMmS / cmdSpd;
+                _currentVx *= boost;
+                _currentVy *= boost;
+            }
         }
     }
 
@@ -494,7 +625,7 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             float angle_diff = current_angle - seg.target_angle;
             while (angle_diff > 180.0f) angle_diff -= 360.0f;
             while (angle_diff < -180.0f) angle_diff += 360.0f;
-            if (abs(angle_diff) <= _rotToleranceDeg) done = true;
+            if (fabsf(angle_diff) <= _rotToleranceDeg) done = true;
         } else {
             float dx = seg.target_x - current_x;
             float dy = seg.target_y - current_y;
@@ -505,9 +636,8 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             while (heading_err > 180.0f) heading_err -= 360.0f;
             while (heading_err < -180.0f) heading_err += 360.0f;
 
-            float dot_product = (dx * seg.vx_mm_s) + (dy * seg.vy_mm_s);
-            if ((dist_remaining <= _waypointToleranceMm || dot_product < 0) &&
-                abs(heading_err) <= _rotToleranceDeg) {
+            if (dist_remaining <= _waypointToleranceMm &&
+                fabsf(heading_err) <= _rotToleranceDeg) {
                 done = true;
             }
         }
@@ -540,14 +670,15 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             float angle_diff = current_angle - seg.target_angle;
             while (angle_diff > 180.0f) angle_diff -= 360.0f;
             while (angle_diff < -180.0f) angle_diff += 360.0f;
-            withinTol = (abs(angle_diff) <= _rotToleranceDeg);
+            withinTol = (fabsf(angle_diff) <= _rotToleranceDeg);
+        } else {
             float dx = seg.target_x - current_x;
             float dy = seg.target_y - current_y;
             float heading_err = seg.target_angle - current_angle;
             while (heading_err > 180.0f) heading_err -= 360.0f;
             while (heading_err < -180.0f) heading_err += 360.0f;
             withinTol = (sqrtf(dx * dx + dy * dy) <= _waypointToleranceMm && 
-                         abs(heading_err) <= _rotToleranceDeg);
+                         fabsf(heading_err) <= _rotToleranceDeg);
         }
 
         if (withinTol) {
@@ -558,20 +689,22 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
     return true;
 }
 
+// ============================================================================
+
 void MotionQueue::_advanceToNext() {
     _head = (_head + 1) % MQ_MAX_SEGMENTS;
     _count--;
 
-    // Immediately activate the next segment if available (seamless transition)
     if (_count > 0) {
         MotionSegment &next = _segments[_head % MQ_MAX_SEGMENTS];
         next.state = SegmentState::ACTIVE;
         next.traveled_mm = 0;
+        next.elapsed_ms = 0;
+        // Reset velocity history for this new segment
+        _hasPreviousPose = false;
     }
 }
 
-// ============================================================================
-// Accessors
 // ============================================================================
 
 void MotionQueue::getCurrentVelocity(float &vx_mm_s, float &vy_mm_s, float &omega_deg_s) const {
@@ -616,6 +749,10 @@ void MotionQueue::abort() {
     _tail  = 0;
     _count = 0;
     segmentJustCompleted = false;
+    // Reset velocity tracking — stale estimates must not corrupt next segment
+    _hasPreviousPose = false;
+    _estVx = 0;
+    _estVy = 0;
 }
 
 const MotionSegment* MotionQueue::currentSegment() const {

@@ -520,20 +520,22 @@ void handleParsedMessage(const UdpMessage &msg) {
             Serial.printf("[UDP] Unhandled message type: %d\n", (int)msg.type);
             break;
     }
-}
-
-// ============================================================================
 // Send telemetry status to phone (every STATUS_INTERVAL_MS)
 // ============================================================================
 void sendStatus() {
     float x, y, angle;
     deadReckoning.getCurrentPosition(x, y, angle);
 
-    char buf[64];
+    // Get estimated velocity from MotionQueue for visualization
+    float vx, vy, omega;
+    motionQueue.getEstimatedVelocity(vx, vy, omega);
+
+    char buf[80];
     int len = buildStatusMessage(buf, sizeof(buf),
         x, y, angle,
         motionQueue.remaining(),
-        latencyComp.getLastDriftMagnitude()
+        latencyComp.getLastDriftMagnitude(),
+        vx, vy
     );
 
     udp.beginPacket(phoneIP, udpPort);
@@ -601,8 +603,11 @@ void setup() {
     motionQueue.setDistanceFactors(DISTANCE_FACTOR_H, DISTANCE_FACTOR_V);
     motionQueue.setPrecisionParameters(DECCEL_DISTANCE_MM, ROT_DECCEL_DEG, 
                                        MIN_SPEED_LIMIT_MM_S, MIN_ROT_LIMIT_DEG_S,
+                                       PRECISION_MIN_SPEED_LIMIT_MM_S, PRECISION_MIN_ROT_LIMIT_DEG_S,
+                                       CLOSE_APPROACH_DISTANCE_MM, CLOSE_ROT_APPROACH_DEG,
                                        WAYPOINT_TOLERANCE_MM, ROTATION_TOLERANCE_DEG,
                                        STABILIZATION_GAIN, MAX_STABILIZATION_OMEGA);
+    motionQueue.setPredictiveParameters(PREDICTIVE_LOOKAHEAD_S);
 
     latencyComp.init(&deadReckoning, &motionQueue);
     latencyComp.setThresholds(DRIFT_THRESHOLD_MM, EMERGENCY_THRESHOLD_MM);

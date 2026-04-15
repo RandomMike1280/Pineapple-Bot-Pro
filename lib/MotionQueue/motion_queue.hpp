@@ -77,8 +77,16 @@ public:
     /// Set precision and deceleration parameters
     void setPrecisionParameters(float deccel_dist_mm, float rot_deccel_deg, 
                                 float min_speed_mm_s, float min_rot_deg_s,
+                                float precision_min_speed_mm_s, float precision_min_rot_deg_s,
+                                float close_approach_dist_mm, float close_rot_approach_deg,
                                 float waypoint_tol_mm, float rot_tol_deg,
                                 float rot_stab_gain, float max_stab_omega);
+
+    /// Set predictive steering parameters
+    void setPredictiveParameters(float lookahead_time_s);
+
+    /// Get the EMA-smoothed observed velocity (mm/s)
+    void getEstimatedVelocity(float &vx, float &vy) const;
 
     /// Enqueue a new motion segment.
     /// @param currentX, currentY, currentAngle current estimated position
@@ -183,14 +191,26 @@ private:
     float _rotDeccelDeg;
     float _minSpeedLimitMmS;
     float _minRotLimitDegS;
+    float _precisionMinSpeedLimitMmS;
+    float _precisionMinRotLimitDegS;
+    float _closeApproachDistMm;
+    float _closeRotApproachDeg;
     float _waypointToleranceMm;
     float _rotToleranceDeg;
     float _rotStabilizationGain;
     float _maxStabilizationOmega;
 
+    // Velocity tracking for predictive steering
+    float _prevPoseX, _prevPoseY;
+    bool  _hasPreviousPose;
+    float _estVx, _estVy;           // EMA-smoothed observed velocity (mm/s)
+    float _lookaheadTimeS;           // how far ahead to predict (seconds)
+    uint32_t _tickTimeMs;            // monotonic tick timer
+
     float _getSpeedMmS(SpeedLevel level) const;
     float _getSpeedDegS(SpeedLevel level) const;
     void  _advanceToNext();
+    void  _updateVelocityEstimate(float x, float y, float dt_s);
 };
 
 #endif // MOTION_QUEUE_HPP
