@@ -18,7 +18,7 @@
 #include <motion_queue.hpp>
 #include <latency_compensator.hpp>
 #include <udp_protocol.hpp>
-#include <ServoControl/servo_control.hpp>
+#include <servo_control.hpp>
 
 // ============================================================================
 // WiFi Configuration
