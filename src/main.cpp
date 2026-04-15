@@ -516,7 +516,8 @@ void handleParsedMessage(const UdpMessage &msg) {
                                (cur->state == SegmentState::ACTIVE ||
                                 cur->state == SegmentState::HOLDING) &&
                                fabsf(cur->target_x - msg.target_x) < 15.0f &&
-                               fabsf(cur->target_y - msg.target_y) < 15.0f);
+                               fabsf(cur->target_y - msg.target_y) < 15.0f &&
+                               msg.servoAction == ServoAction::NONE);
 
             if (!sameTarget) {
                 motionQueue.abort();
