@@ -270,7 +270,6 @@ void applyMotors() {
         bH *= scale;
         // Apply mecanum axis correction (same as normal path)
         bH /= sqrt(2.0);
-        bV *= sqrt(2.0);
         MecanumSpeeds bs = computeMecanumSpeeds(bV, bH, 0, false);
 #ifndef TEST_MODE
         Motor1.Run(bs.m1);
@@ -346,10 +345,9 @@ void applyMotors() {
     H *= motorRampFactor;
 
     // Mecanum wheels: H=forward(vertical) is √2× faster than V=strafe(horizontal).
-    // Divide H by √2 to slow vertical, multiply V by √2 to boost strafe.
-    // Both adjustments equalize physical speed between axes.
+    // Divide H by √2 to slow vertical to match horizontal's natural speed.
+    // Don't boost V — horizontal is already reliable at its natural speed.
     H /= sqrt(2.0);
-    V *= sqrt(2.0);
 
     // Drift trim: pre-rotate (V, H) CCW by a speed-dependent angle to counteract
     // the measured systematic leftward bias in translation.
