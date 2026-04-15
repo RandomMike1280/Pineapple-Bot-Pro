@@ -18,6 +18,7 @@
 #include <motion_queue.hpp>
 #include <latency_compensator.hpp>
 #include <udp_protocol.hpp>
+#include <ServoControl/servo_control.hpp>
 
 // ============================================================================
 // WiFi Configuration
@@ -450,7 +451,7 @@ void handleParsedMessage(const UdpMessage &msg) {
 
             bool ok = motionQueue.enqueue(
                 msg.direction, msg.distance_mm,
-                msg.speed, msg.correctionPolicy,
+                msg.speed, msg.correctionPolicy, msg.servoAction,
                 cx, cy, c_angle
             );
             if (ok) {
@@ -521,7 +522,7 @@ void handleParsedMessage(const UdpMessage &msg) {
                 motionQueue.abort();
                 bool ok = motionQueue.enqueueWaypoint(
                     msg.target_x, msg.target_y, msg.target_angle,
-                    msg.speed, msg.correctionPolicy,
+                    msg.speed, msg.correctionPolicy, msg.servoAction,
                     cx, cy, c_angle
                 );
                 if (ok) {
@@ -698,6 +699,8 @@ void setup() {
     deadReckoning.reset(0, 0, 0);
     deadReckoning.setDistanceFactors(DISTANCE_FACTOR_H, DISTANCE_FACTOR_V);
 
+    initServoControl();
+
     Motor1.Reverse();
     Motor2.Reverse();
 
@@ -860,6 +863,19 @@ void loop() {
     deadReckoning.getCurrentPosition(current_x, current_y, current_angle);
     bool moving = motionQueue.tick(dt, current_x, current_y, current_angle);
 
+    ServoAction actionToExecute = ServoAction::NONE;
+    if (motionQueue.segmentJustCompleted) {
+        actionToExecute = motionQueue.getLastCompletedServoAction();
+        // Clear flag now that we've captured the action
+        motionQueue.segmentJustCompleted = false;
+
+        if (motionQueue.getActivePolicy() == CorrectionPolicy::DEFERRED) {
+            float dcX, dcY, dcA;
+            motionQueue.getDeferredCorrection(dcX, dcY, dcA);
+            latencyComp.applyCorrection(dcX, dcY, dcA, CORRECTION_BLEND_MS);
+        }
+    }
+
 
     // ---- Handle emergency deceleration ----
     if (latencyComp.wasEmergencyTriggered() && moving) {
@@ -874,6 +890,17 @@ void loop() {
     deadReckoning.update(currentVx, currentVy, currentOmega, dt);
 
     xSemaphoreGive(stateMutex);
+
+    // ---- Execution (OUTSIDE mutex) ----
+    // This allows Core 0 to handle heartbeats and new waypoint commands 
+    // while the robot is busy with its servo sequence.
+    if (actionToExecute != ServoAction::NONE) {
+        Serial.printf("[SERVO] Executing Action: %d\n", (int)actionToExecute);
+        executeServoAction(actionToExecute);
+        
+        // Rearm kickstart because the motors have been stopped for a while
+        rearmKickstart();
+    }
 
 #ifdef TEST_MODE
     static uint32_t lastLedBlinkTime = 0;

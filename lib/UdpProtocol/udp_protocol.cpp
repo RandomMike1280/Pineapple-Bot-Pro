@@ -62,6 +62,20 @@ CorrectionPolicy parsePolicy(const char *str) {
   return CorrectionPolicy::INVALID;
 }
 
+ServoAction parseServoAction(const char *str) {
+  if (strcmp(str, "none") == 0 || strcmp(str, "N") == 0)
+    return ServoAction::NONE;
+  if (strcmp(str, "lower_left") == 0 || strcmp(str, "LL") == 0)
+    return ServoAction::LOWER_LEFT;
+  if (strcmp(str, "lower_right") == 0 || strcmp(str, "LR") == 0)
+    return ServoAction::LOWER_RIGHT;
+  if (strcmp(str, "upper_left") == 0 || strcmp(str, "UL") == 0)
+    return ServoAction::UPPER_LEFT;
+  if (strcmp(str, "upper_right") == 0 || strcmp(str, "UR") == 0)
+    return ServoAction::UPPER_RIGHT;
+  return ServoAction::INVALID;
+}
+
 void directionToVector(MoveDirection dir, float &vx, float &vy) {
   vx = 0.0f;
   vy = 0.0f;
@@ -111,6 +125,7 @@ bool parseUdpMessage(const char *buffer, int len, UdpMessage &out) {
 
   memset(&out, 0, sizeof(out));
   out.type = MsgType::UNKNOWN;
+  out.servoAction = ServoAction::NONE;
 
   char typeChar = tokens[0][0];
 
@@ -122,7 +137,7 @@ bool parseUdpMessage(const char *buffer, int len, UdpMessage &out) {
     }
     return true;
 
-  case 'M': // MOVE — M:<dir>:<dist>:<speed>:<policy>
+  case 'M': // MOVE — M:<dir>:<dist>:<speed>:<policy>[:<action>]
     if (numTokens < 5)
       return false;
     out.type = MsgType::MOVE;
@@ -130,9 +145,13 @@ bool parseUdpMessage(const char *buffer, int len, UdpMessage &out) {
     out.distance_mm = (uint16_t)atoi(tokens[2]);
     out.speed = parseSpeed(tokens[3]);
     out.correctionPolicy = parsePolicy(tokens[4]);
+    if (numTokens >= 6) {
+      out.servoAction = parseServoAction(tokens[5]);
+    }
     return (out.direction != MoveDirection::INVALID &&
             out.speed != SpeedLevel::INVALID &&
-            out.correctionPolicy != CorrectionPolicy::INVALID);
+            out.correctionPolicy != CorrectionPolicy::INVALID &&
+            out.servoAction != ServoAction::INVALID);
 
   case 'W': { // WAYPOINT — W:<x>:<y>[:<angle>]:<speed>:<policy>
     if (numTokens < 5) return false;
@@ -142,10 +161,13 @@ bool parseUdpMessage(const char *buffer, int len, UdpMessage &out) {
     out.target_x = py; // Swapped for robot-frame
     out.target_y = px; // Swapped for robot-frame
     if (numTokens >= 6) {
-      // Full form: W:<x>:<y>:<angle>:<speed>:<policy>
+      // Full form: W:<x>:<y>:<angle>:<speed>:<policy>[:<action>]
       out.target_angle = atof(tokens[3]);
       out.speed = parseSpeed(tokens[4]);
       out.correctionPolicy = parsePolicy(tokens[5]);
+      if (numTokens >= 7) {
+        out.servoAction = parseServoAction(tokens[6]);
+      }
     } else {
       // Short form: W:<x>:<y>:<speed>:<policy>  (angle defaults to 0)
       out.target_angle = 0.0f;
@@ -153,7 +175,8 @@ bool parseUdpMessage(const char *buffer, int len, UdpMessage &out) {
       out.correctionPolicy = parsePolicy(tokens[4]);
     }
     return (out.speed != SpeedLevel::INVALID &&
-            out.correctionPolicy != CorrectionPolicy::INVALID);
+            out.correctionPolicy != CorrectionPolicy::INVALID &&
+            out.servoAction != ServoAction::INVALID);
   }
 
   case 'T': // ROTATE — T:<target_angle>:<speed>:<policy>

@@ -132,6 +132,7 @@ struct MotionSegment {
     uint16_t         distance_mm;
     SpeedLevel       speed;
     CorrectionPolicy correctionPolicy;
+    ServoAction      servoAction;
 
     // Computed at enqueue time
     float target_x;      // absolute target position (mm)
@@ -160,6 +161,7 @@ struct MotionSegment {
 
     MotionSegment() : direction(MoveDirection::INVALID), distance_mm(0),
                       speed(SpeedLevel::NORMAL), correctionPolicy(CorrectionPolicy::LIVE),
+                      servoAction(ServoAction::NONE),
                       target_x(0), target_y(0), target_angle(0), start_x(0), start_y(0), start_angle(0),
                       vx_mm_s(0), vy_mm_s(0), omega_deg_s(0), speed_mm_s(0), speed_deg_s(0),
                       isDurationBased(false), duration_ms(0), elapsed_ms(0),
@@ -224,14 +226,14 @@ public:
     /// @param currentX, currentY, currentAngle current estimated position
     /// @returns true if enqueued, false if queue is full
     bool enqueue(MoveDirection direction, uint16_t distance_mm,
-                 SpeedLevel speed, CorrectionPolicy policy,
+                 SpeedLevel speed, CorrectionPolicy policy, ServoAction action,
                  float currentX, float currentY, float currentAngle);
 
     /// Enqueue a new waypoint motion segment (absolute coordinate).
     /// @param currentX, currentY, currentAngle current estimated position
     /// @returns true if enqueued, false if queue is full
     bool enqueueWaypoint(float target_x, float target_y, float targetAngle,
-                         SpeedLevel speed, CorrectionPolicy policy,
+                         SpeedLevel speed, CorrectionPolicy policy, ServoAction action,
                          float currentX, float currentY, float currentAngle);
 
     /// Enqueue a duration-based move segment (move for a fixed time).
@@ -277,6 +279,9 @@ public:
 
     /// Get deferred correction (when segment finishes)
     void getDeferredCorrection(float &errX, float &errY, float &errAngle) const;
+
+    /// Get the servo action of the segment that just completed
+    ServoAction getLastCompletedServoAction() const;
 
     /// Number of segments remaining (including active)
     int  remaining() const;
