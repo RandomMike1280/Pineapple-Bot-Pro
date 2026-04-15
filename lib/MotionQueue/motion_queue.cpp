@@ -118,7 +118,7 @@ float MotionQueue::_getSpeedDegS(SpeedLevel level) const {
 // ============================================================================
 
 bool MotionQueue::enqueueWaypoint(float target_x, float target_y, float targetAngle,
-                                  SpeedLevel speed, CorrectionPolicy policy,
+                                  SpeedLevel speed, CorrectionPolicy policy, ServoAction action,
                                   float currentX, float currentY, float currentAngle) {
     if (_count >= MQ_MAX_SEGMENTS) return false;
 
@@ -126,6 +126,7 @@ bool MotionQueue::enqueueWaypoint(float target_x, float target_y, float targetAn
     seg.direction       = MoveDirection::INVALID;  // Not a discrete direction
     seg.speed           = speed;
     seg.correctionPolicy = policy;
+    seg.servoAction     = action;
     seg.state           = SegmentState::PENDING;
     seg.traveled_mm     = 0;
     seg.isDurationBased = false;
@@ -375,7 +376,7 @@ bool MotionQueue::enqueueVelocity(float vx_mm_s, float vy_mm_s, float omega_deg_
 }
 
 bool MotionQueue::enqueue(MoveDirection direction, uint16_t distance_mm,
-                          SpeedLevel speed, CorrectionPolicy policy,
+                          SpeedLevel speed, CorrectionPolicy policy, ServoAction action,
                           float currentX, float currentY, float currentAngle) {
     if (_count >= MQ_MAX_SEGMENTS) return false;
 
@@ -384,6 +385,7 @@ bool MotionQueue::enqueue(MoveDirection direction, uint16_t distance_mm,
     seg.distance_mm     = distance_mm;
     seg.speed           = speed;
     seg.correctionPolicy = policy;
+    seg.servoAction     = action;
     seg.state           = SegmentState::PENDING;
     seg.traveled_mm     = 0;
     seg.isDurationBased = false;
@@ -734,6 +736,11 @@ void MotionQueue::getDeferredCorrection(float &errX, float &errY, float &errAngl
     errX = _segments[prevIdx].deferred_correction_x;
     errY = _segments[prevIdx].deferred_correction_y;
     errAngle = _segments[prevIdx].deferred_correction_angle;
+}
+
+ServoAction MotionQueue::getLastCompletedServoAction() const {
+    int prevIdx = (_head - 1 + MQ_MAX_SEGMENTS) % MQ_MAX_SEGMENTS;
+    return _segments[prevIdx].servoAction;
 }
 
 int MotionQueue::remaining() const {

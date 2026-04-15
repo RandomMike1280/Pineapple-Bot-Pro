@@ -18,6 +18,7 @@
 #include <motion_queue.hpp>
 #include <latency_compensator.hpp>
 #include <udp_protocol.hpp>
+#include <ServoControl/servo_control.hpp>
 
 // ============================================================================
 // WiFi Configuration
@@ -350,7 +351,7 @@ void handleParsedMessage(const UdpMessage &msg) {
 
             bool ok = motionQueue.enqueue(
                 msg.direction, msg.distance_mm,
-                msg.speed, msg.correctionPolicy,
+                msg.speed, msg.correctionPolicy, msg.servoAction,
                 cx, cy, c_angle
             );
             if (ok) {
@@ -421,7 +422,7 @@ void handleParsedMessage(const UdpMessage &msg) {
                 motionQueue.abort();
                 bool ok = motionQueue.enqueueWaypoint(
                     msg.target_x, msg.target_y, msg.target_angle,
-                    msg.speed, msg.correctionPolicy,
+                    msg.speed, msg.correctionPolicy, msg.servoAction,
                     cx, cy, c_angle
                 );
                 if (ok) {
@@ -595,6 +596,8 @@ void setup() {
     deadReckoning.reset(0, 0, 0);
     deadReckoning.setDistanceFactors(DISTANCE_FACTOR_H, DISTANCE_FACTOR_V);
 
+    initServoControl();
+
     Motor1.Reverse();
     Motor2.Reverse();
 
@@ -745,6 +748,20 @@ void loop() {
     float current_x, current_y, current_angle;
     deadReckoning.getCurrentPosition(current_x, current_y, current_angle);
     bool moving = motionQueue.tick(dt, current_x, current_y, current_angle);
+
+    if (motionQueue.segmentJustCompleted) {
+        ServoAction action = motionQueue.getLastCompletedServoAction();
+        if (action != ServoAction::NONE) {
+            Serial.printf("[SERVO] Executing action: %d\n", (int)action);
+            executeServoAction(action);
+        }
+
+        if (motionQueue.getActivePolicy() == CorrectionPolicy::DEFERRED) {
+            float dcX, dcY, dcA;
+            motionQueue.getDeferredCorrection(dcX, dcY, dcA);
+            latencyComp.applyCorrection(dcX, dcY, dcA, CORRECTION_BLEND_MS);
+        }
+    }
 
 
     // ---- Handle emergency deceleration ----
