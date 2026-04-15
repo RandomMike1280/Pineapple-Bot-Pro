@@ -309,6 +309,21 @@ void applyMotors() {
         A *= rotationOnly ? 1.0 : motorRampFactor;
     }
 
+    // --- Feedforward compensation from S-curve profiler ---
+    // Add acceleration-proportional terms to overcome inertia/friction
+    float ffVx, ffVy, ffOmega;
+    motionQueue.getFeedforward(ffVx, ffVy, ffOmega);
+    if (SPEED_FAST_MM_S > 0.1f) {
+        double headingRad = c_angle * (PI / 180.0f);
+        double cosA = cos(headingRad);
+        double sinA = sin(headingRad);
+        V += (ffVx * cosA + ffVy * sinA) / SPEED_FAST_MM_S;
+        H += (ffVx * sinA - ffVy * cosA) / SPEED_FAST_MM_S;
+    }
+    if (SPEED_FAST_DEG_S > 0.1f) {
+        A += -ffOmega / SPEED_FAST_DEG_S;
+    }
+
     MecanumSpeeds s = computeMecanumSpeeds(V, H, A);
 
 #if ENABLE_DEBUG_LOGGING
@@ -611,6 +626,16 @@ void setup() {
                                        WAYPOINT_TOLERANCE_MM, ROTATION_TOLERANCE_DEG,
                                        STABILIZATION_GAIN, MAX_STABILIZATION_OMEGA);
     motionQueue.setPredictiveParameters(PREDICTIVE_LOOKAHEAD_S);
+    motionQueue.setSCurveParameters(SCURVE_MAX_ACCEL_MM_S2, SCURVE_MAX_JERK_MM_S3,
+                                     SCURVE_MAX_ROT_ACCEL_DEG_S2, SCURVE_MAX_ROT_JERK_DEG_S3);
+    motionQueue.setFeedforwardGains(FEEDFORWARD_KV, FEEDFORWARD_KA,
+                                     FEEDFORWARD_KV_ROT, FEEDFORWARD_KA_ROT);
+    motionQueue.setAdaptiveLookahead(ADAPTIVE_LOOKAHEAD_BASE_S, ADAPTIVE_LOOKAHEAD_GAIN,
+                                      ADAPTIVE_LOOKAHEAD_MIN_S, ADAPTIVE_LOOKAHEAD_MAX_S);
+    motionQueue.setKalmanParameters(KALMAN_PROCESS_NOISE_POS, KALMAN_PROCESS_NOISE_VEL,
+                                     KALMAN_MEASUREMENT_NOISE);
+    motionQueue.setSlipDetection(SLIP_CMD_SPEED_THRESH_MM_S, SLIP_OBS_SPEED_THRESH_MM_S,
+                                  SLIP_DETECT_TICKS, SLIP_BOOST_FACTOR, SLIP_BOOST_MAX_TICKS);
 
     latencyComp.init(&deadReckoning, &motionQueue);
     latencyComp.setThresholds(DRIFT_THRESHOLD_MM, EMERGENCY_THRESHOLD_MM);

@@ -20,8 +20,20 @@ MotionQueue::MotionQueue()
       _rotStabilizationGain(1.5f), _maxStabilizationOmega(35.0f),
       _prevPoseX(0), _prevPoseY(0), _hasPreviousPose(false),
       _estVx(0), _estVy(0), _lookaheadTimeS(0.15f), _tickTimeMs(0),
+      _scurveMaxAccelMmS2(250.0f), _scurveMaxJerkMmS3(1200.0f),
+      _scurveMaxRotAccelDegS2(180.0f), _scurveMaxRotJerkDegS3(900.0f),
+      _ffKv(0.02f), _ffKa(0.04f), _ffKvRot(0.01f), _ffKaRot(0.02f),
+      _ffVx(0), _ffVy(0), _ffOmega(0),
+      _adaptLookaheadBaseS(0.06f), _adaptLookaheadGain(0.0022f),
+      _adaptLookaheadMinS(0.04f), _adaptLookaheadMaxS(0.25f),
+      _kalmanInitialized(false),
+      _slipCmdThresh(15.0f), _slipObsThresh(5.0f), _slipDetectTicks(25),
+      _slipBoostFactor(1.35f), _slipBoostMaxTicks(40),
+      _slipCounter(0), _slipBoostRemaining(0), _slipDetected(false),
       segmentJustCompleted(false)
 {
+    _scurveTrans.reset(_scurveMaxAccelMmS2, _scurveMaxJerkMmS3);
+    _scurveRot.reset(_scurveMaxRotAccelDegS2, _scurveMaxRotJerkDegS3);
 }
 
 void MotionQueue::setSpeedCalibration(float slow_mm_s, float normal_mm_s, float fast_mm_s) {
@@ -65,41 +77,107 @@ void MotionQueue::setPredictiveParameters(float lookahead_time_s) {
     _lookaheadTimeS = lookahead_time_s;
 }
 
+void MotionQueue::setSCurveParameters(float max_accel_mm_s2, float max_jerk_mm_s3,
+                                       float max_rot_accel_deg_s2, float max_rot_jerk_deg_s3) {
+    _scurveMaxAccelMmS2 = max_accel_mm_s2;
+    _scurveMaxJerkMmS3 = max_jerk_mm_s3;
+    _scurveMaxRotAccelDegS2 = max_rot_accel_deg_s2;
+    _scurveMaxRotJerkDegS3 = max_rot_jerk_deg_s3;
+    _scurveTrans.reset(max_accel_mm_s2, max_jerk_mm_s3);
+    _scurveRot.reset(max_rot_accel_deg_s2, max_rot_jerk_deg_s3);
+}
+
+void MotionQueue::setFeedforwardGains(float kv, float ka, float kv_rot, float ka_rot) {
+    _ffKv = kv; _ffKa = ka; _ffKvRot = kv_rot; _ffKaRot = ka_rot;
+}
+
+void MotionQueue::setAdaptiveLookahead(float base_s, float gain, float min_s, float max_s) {
+    _adaptLookaheadBaseS = base_s;
+    _adaptLookaheadGain = gain;
+    _adaptLookaheadMinS = min_s;
+    _adaptLookaheadMaxS = max_s;
+}
+
+void MotionQueue::setKalmanParameters(float q_pos, float q_vel, float r_meas) {
+    _kalmanX.qPos = q_pos; _kalmanX.qVel = q_vel; _kalmanX.rMeas = r_meas;
+    _kalmanY.qPos = q_pos; _kalmanY.qVel = q_vel; _kalmanY.rMeas = r_meas;
+}
+
+void MotionQueue::getFeedforward(float &ff_vx, float &ff_vy, float &ff_omega) const {
+    ff_vx = _ffVx; ff_vy = _ffVy; ff_omega = _ffOmega;
+}
+
+void MotionQueue::setSlipDetection(float cmd_thresh, float obs_thresh, int detect_ticks,
+                                    float boost_factor, int boost_max_ticks) {
+    _slipCmdThresh = cmd_thresh;
+    _slipObsThresh = obs_thresh;
+    _slipDetectTicks = detect_ticks;
+    _slipBoostFactor = boost_factor;
+    _slipBoostMaxTicks = boost_max_ticks;
+}
+
+bool MotionQueue::isSlipDetected() const {
+    return _slipDetected;
+}
+
+float MotionQueue::_computeAdaptiveLookahead(float currentSpeed) const {
+    float la = _adaptLookaheadBaseS + _adaptLookaheadGain * currentSpeed;
+    if (la < _adaptLookaheadMinS) la = _adaptLookaheadMinS;
+    if (la > _adaptLookaheadMaxS) la = _adaptLookaheadMaxS;
+    return la;
+}
+
 void MotionQueue::getEstimatedVelocity(float &vx, float &vy) const {
     vx = _estVx;
     vy = _estVy;
 }
 
 void MotionQueue::_updateVelocityEstimate(float x, float y, float dt_s) {
-    if (!_hasPreviousPose) {
+    if (dt_s < 0.001f) return;
+
+    if (!_kalmanInitialized) {
+        _kalmanX.reset(x, 0.0f, _kalmanX.qPos, _kalmanX.qVel, _kalmanX.rMeas);
+        _kalmanY.reset(y, 0.0f, _kalmanY.qPos, _kalmanY.qVel, _kalmanY.rMeas);
+        _kalmanInitialized = true;
         _prevPoseX = x;
         _prevPoseY = y;
         _hasPreviousPose = true;
         return;
     }
-    if (dt_s < 0.001f) return;
-
-    float inst_vx = (x - _prevPoseX) / dt_s;
-    float inst_vy = (y - _prevPoseY) / dt_s;
-    _prevPoseX = x;
-    _prevPoseY = y;
 
     // Reject outlier spikes from camera correction jumps
-    float inst_speed = sqrtf(inst_vx * inst_vx + inst_vy * inst_vy);
-    float max_plausible = _speedFast * 3.0f;
-    if (inst_speed > max_plausible) return;
+    float jumpDist = sqrtf((x - _prevPoseX) * (x - _prevPoseX) +
+                           (y - _prevPoseY) * (y - _prevPoseY));
+    float maxJump = _speedFast * 3.0f * dt_s;
+    _prevPoseX = x;
+    _prevPoseY = y;
+    _hasPreviousPose = true;
 
-    // Stationary deadzone: if barely moving, treat as zero to prevent noise accumulation
-    const float deadzoneMmS = 3.0f;
-    if (inst_speed < deadzoneMmS) {
-        inst_vx = 0.0f;
-        inst_vy = 0.0f;
+    if (jumpDist > maxJump) {
+        // Outlier — re-anchor Kalman without updating velocity
+        _kalmanX.x = x;
+        _kalmanY.x = y;
+        return;
     }
 
-    // EMA smoothing (alpha ≈ 0.12 → effective window ~40ms at 5ms ticks)
-    const float alpha = 0.12f;
-    _estVx = _estVx * (1.0f - alpha) + inst_vx * alpha;
-    _estVy = _estVy * (1.0f - alpha) + inst_vy * alpha;
+    // Kalman predict step (propagate state forward by dt)
+    _kalmanX.predict(dt_s);
+    _kalmanY.predict(dt_s);
+
+    // Kalman correct step (fuse position measurement)
+    _kalmanX.correct(x);
+    _kalmanY.correct(y);
+
+    // Stationary deadzone: kill velocity estimate noise when nearly stopped
+    float est_speed = sqrtf(_kalmanX.v * _kalmanX.v + _kalmanY.v * _kalmanY.v);
+    const float deadzoneMmS = 3.0f;
+    if (est_speed < deadzoneMmS) {
+        _kalmanX.v = 0.0f;
+        _kalmanY.v = 0.0f;
+    }
+
+    _estVx = _kalmanX.v;
+    _estVy = _kalmanY.v;
 }
 
 float MotionQueue::_getSpeedMmS(SpeedLevel level) const {
@@ -454,6 +532,10 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
         seg.state = SegmentState::ACTIVE;
         seg.traveled_mm = 0;
         seg.elapsed_ms = 0;
+        // Reset S-curve profilers for clean start on new segment
+        _scurveTrans.reset(_scurveMaxAccelMmS2, _scurveMaxJerkMmS3);
+        _scurveRot.reset(_scurveMaxRotAccelDegS2, _scurveMaxRotJerkDegS3);
+        _ffVx = _ffVy = _ffOmega = 0;
     }
 
     if (seg.state != SegmentState::ACTIVE && seg.state != SegmentState::HOLDING) {
@@ -516,9 +598,29 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
 
             _currentVx = 0;
             _currentVy = 0;
-            _currentOmega = (abs_diff <= _rotToleranceDeg)
-                ? 0.0f
-                : (angle_diff > 0 ? seg.speed_deg_s : -seg.speed_deg_s) * speed_scale;
+            // S-curve: shape rotation speed through jerk-limited profiler
+            float rawRotSpeed = (abs_diff <= _rotToleranceDeg) ? 0.0f
+                : seg.speed_deg_s * speed_scale;
+            float profiledRotSpeed;
+            // Bypass S-curve in settling band to prevent ramp-down tail wiggle
+            if (rawRotSpeed < 0.001f || abs_diff < _rotToleranceDeg * 2.5f) {
+                profiledRotSpeed = rawRotSpeed;
+                _scurveRot.profiledSpeed = rawRotSpeed;
+                _scurveRot.prevProfiledSpeed = rawRotSpeed;
+                _scurveRot.currentAccel = 0;
+            } else {
+                profiledRotSpeed = _scurveRot.update(rawRotSpeed, dt_s);
+            }
+            float rotSign = (angle_diff >= 0.0f) ? 1.0f : -1.0f;
+            _currentOmega = (abs_diff <= _rotToleranceDeg) ? 0.0f
+                : rotSign * profiledRotSpeed;
+            // Feedforward from rotation S-curve acceleration (only during accel phase)
+            float rotAccel = (dt_s > 0.0001f) ?
+                (profiledRotSpeed - _scurveRot.prevProfiledSpeed) / dt_s : 0.0f;
+            _ffOmega = (rotAccel > 0.0f)
+                ? (_ffKvRot * profiledRotSpeed + _ffKaRot * rotAccel)
+                : 0.0f;
+            _ffVx = 0; _ffVy = 0;
         } else {
             float dx = seg.target_x - current_x;
             float dy = seg.target_y - current_y;
@@ -576,25 +678,54 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
                 }
             }
 
-            // --- Predictive steering: aim from predicted future position ---
+            // --- Adaptive Predictive Steering ---
+            // Only use prediction OUTSIDE the close-approach zone.
+            // Inside close-approach, prediction causes aim-vector flipping/wiggle.
             float aim_dx = dx;
             float aim_dy = dy;
-            if (_lookaheadTimeS > 0.001f && dist_remaining > _waypointToleranceMm) {
-                // Scale lookahead down in close-approach zone to avoid oscillation
-                float effective_lookahead = _lookaheadTimeS;
-                if (_closeApproachDistMm > 0.001f && dist_remaining < _closeApproachDistMm) {
-                    effective_lookahead *= dist_remaining / _closeApproachDistMm;
+            if (dist_remaining > _closeApproachDistMm) {
+                float currentObsSpeed = sqrtf(_estVx * _estVx + _estVy * _estVy);
+                float adaptiveLookahead = _computeAdaptiveLookahead(currentObsSpeed);
+                if (adaptiveLookahead > 0.001f) {
+                    float pred_x = current_x + _estVx * adaptiveLookahead;
+                    float pred_y = current_y + _estVy * adaptiveLookahead;
+                    aim_dx = seg.target_x - pred_x;
+                    aim_dy = seg.target_y - pred_y;
                 }
-                // Predict where we'll be, aim from there to target
-                float pred_x = current_x + _estVx * effective_lookahead;
-                float pred_y = current_y + _estVy * effective_lookahead;
-                aim_dx = seg.target_x - pred_x;
-                aim_dy = seg.target_y - pred_y;
             }
             float aim_dist = sqrtf(aim_dx * aim_dx + aim_dy * aim_dy);
             float aim_inv = (aim_dist > 0.001f) ? (1.0f / aim_dist) : 0.0f;
-            _currentVx = aim_dx * aim_inv * seg.speed_mm_s * speed_scale;
-            _currentVy = aim_dy * aim_inv * seg.speed_mm_s * speed_scale;
+
+            // --- S-Curve Profiling: jerk-limited speed ramp ---
+            float rawTransSpeed = seg.speed_mm_s * speed_scale;
+            float profiledTransSpeed;
+
+            // In settling band (within 2× tolerance) or at zero target:
+            // bypass S-curve and use raw speed directly — prevents ramp-down
+            // tail from coasting through the target and causing wiggle.
+            if (rawTransSpeed < 0.001f || dist_remaining < _waypointToleranceMm * 2.5f) {
+                profiledTransSpeed = rawTransSpeed;
+                _scurveTrans.profiledSpeed = rawTransSpeed;
+                _scurveTrans.prevProfiledSpeed = rawTransSpeed;
+                _scurveTrans.currentAccel = 0;
+            } else {
+                profiledTransSpeed = _scurveTrans.update(rawTransSpeed, dt_s);
+            }
+
+            _currentVx = aim_dx * aim_inv * profiledTransSpeed;
+            _currentVy = aim_dy * aim_inv * profiledTransSpeed;
+
+            // --- Feedforward from S-curve acceleration ---
+            // Only apply feedforward during acceleration (positive accel).
+            // During deceleration, FF fights the brake and causes overshoot/orbiting.
+            float transAccel = (dt_s > 0.0001f) ?
+                (profiledTransSpeed - _scurveTrans.prevProfiledSpeed) / dt_s : 0.0f;
+            if (transAccel > 0.0f) {
+                _ffVx = aim_dx * aim_inv * (_ffKv * profiledTransSpeed + _ffKa * transAccel);
+                _ffVy = aim_dy * aim_inv * (_ffKv * profiledTransSpeed + _ffKa * transAccel);
+            } else {
+                _ffVx = 0; _ffVy = 0;
+            }
 
             // --- Active Heading Stabilization ---
             // Calculate error between actual heading and segment's target angle
@@ -607,6 +738,8 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             }
 
             _currentOmega = heading_err * stabilization_gain;
+            // Only apply rotation FF during accel; during decel it causes heading wobble
+            _ffOmega = (transAccel > 0.0f) ? (_ffKvRot * fabsf(_currentOmega)) : 0.0f;
 
             // Clamp stabilization power to prevent violent shakes
             if (_currentOmega > _maxStabilizationOmega) _currentOmega = _maxStabilizationOmega;
@@ -619,6 +752,40 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
                 float boost = _precisionMinSpeedLimitMmS / cmdSpd;
                 _currentVx *= boost;
                 _currentVy *= boost;
+            }
+        }
+    }
+
+    // --- SLIP / STALL DETECTION ---
+    // Compare commanded speed vs Kalman-observed speed.
+    // If commanding significant motion but not actually moving, count ticks.
+    if (!seg.isDurationBased) {
+        float cmdSpeed = sqrtf(_currentVx * _currentVx + _currentVy * _currentVy);
+        float obsSpeed = sqrtf(_estVx * _estVx + _estVy * _estVy);
+
+        if (cmdSpeed > _slipCmdThresh && obsSpeed < _slipObsThresh) {
+            _slipCounter++;
+        } else {
+            _slipCounter = 0;
+            if (_slipBoostRemaining > 0) _slipBoostRemaining--;
+        }
+
+        if (_slipCounter >= _slipDetectTicks && _slipBoostRemaining == 0) {
+            // Stall confirmed — start boost phase
+            _slipBoostRemaining = _slipBoostMaxTicks;
+            _slipDetected = true;
+#if ENABLE_DEBUG_LOGGING
+            Serial.printf("[MQ] Slip detected! cmd=%.1f obs=%.1f — boosting\n", cmdSpeed, obsSpeed);
+#endif
+        }
+
+        if (_slipBoostRemaining > 0) {
+            _currentVx *= _slipBoostFactor;
+            _currentVy *= _slipBoostFactor;
+            _slipBoostRemaining--;
+            if (_slipBoostRemaining == 0) {
+                _slipDetected = false;
+                _slipCounter = 0;
             }
         }
     }
@@ -760,6 +927,15 @@ void MotionQueue::abort() {
     _hasPreviousPose = false;
     _estVx = 0;
     _estVy = 0;
+    // Reset Kalman filter so next segment starts fresh
+    _kalmanInitialized = false;
+    // Reset S-curve profilers
+    _scurveTrans.reset(_scurveMaxAccelMmS2, _scurveMaxJerkMmS3);
+    _scurveRot.reset(_scurveMaxRotAccelDegS2, _scurveMaxRotJerkDegS3);
+    _ffVx = _ffVy = _ffOmega = 0;
+    _slipCounter = 0;
+    _slipBoostRemaining = 0;
+    _slipDetected = false;
 }
 
 const MotionSegment* MotionQueue::currentSegment() const {
