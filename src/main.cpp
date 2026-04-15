@@ -520,6 +520,9 @@ void handleParsedMessage(const UdpMessage &msg) {
             Serial.printf("[UDP] Unhandled message type: %d\n", (int)msg.type);
             break;
     }
+} // Added closing bracket here
+
+// ============================================================================
 // Send telemetry status to phone (every STATUS_INTERVAL_MS)
 // ============================================================================
 void sendStatus() {
@@ -527,8 +530,8 @@ void sendStatus() {
     deadReckoning.getCurrentPosition(x, y, angle);
 
     // Get estimated velocity from MotionQueue for visualization
-    float vx, vy, omega;
-    motionQueue.getEstimatedVelocity(vx, vy, omega);
+    float vx, vy;
+    motionQueue.getEstimatedVelocity(vx, vy);
 
     char buf[80];
     int len = buildStatusMessage(buf, sizeof(buf),

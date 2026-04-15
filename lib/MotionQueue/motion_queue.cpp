@@ -89,6 +89,13 @@ void MotionQueue::_updateVelocityEstimate(float x, float y, float dt_s) {
     float max_plausible = _speedFast * 3.0f;
     if (inst_speed > max_plausible) return;
 
+    // Stationary deadzone: if barely moving, treat as zero to prevent noise accumulation
+    const float deadzoneMmS = 3.0f;
+    if (inst_speed < deadzoneMmS) {
+        inst_vx = 0.0f;
+        inst_vy = 0.0f;
+    }
+
     // EMA smoothing (alpha ≈ 0.12 → effective window ~40ms at 5ms ticks)
     const float alpha = 0.12f;
     _estVx = _estVx * (1.0f - alpha) + inst_vx * alpha;
