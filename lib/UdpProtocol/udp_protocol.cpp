@@ -267,6 +267,12 @@ bool parseUdpMessage(const char *buffer, int len, UdpMessage &out) {
   case 'X': // DONE — X[:<status>]
     out.type = MsgType::DONE;
     return true;
+    
+  case 'U': // SET_SERIAL_MONITOR — U:<0|1>
+    if (numTokens < 2) return false;
+    out.type = MsgType::SET_SERIAL_MONITOR;
+    out.duration_ms = (uint32_t)atoi(tokens[1]); // Reusing duration_ms for 0/1 flag
+    return true;
 
   default:
     return false;
@@ -297,4 +303,13 @@ int buildStatusMessage(char *buf, int maxLen, float x, float y, float angle, int
 int buildRegisterMessage(char *buf, int maxLen, const char *robotId,
                          const char *capabilities) {
   return snprintf(buf, maxLen, "R:%s:%s", robotId, capabilities);
+}
+
+int buildLogMessage(char *buf, int maxLen, char type, const char *logId,
+                    const char *msg) {
+  if (logId && logId[0] != '\0') {
+    return snprintf(buf, maxLen, "L:%c:%s:%s", type, logId, msg);
+  } else {
+    return snprintf(buf, maxLen, "L:%c:%s", type, msg);
+  }
 }

@@ -19,6 +19,7 @@
 #include <latency_compensator.hpp>
 #include <udp_protocol.hpp>
 #include <servo_control.hpp>
+#include <udp_logger.hpp>
 
 // ============================================================================
 // WiFi Configuration
@@ -36,6 +37,7 @@ IPAddress        phoneIP;
 DeadReckoning    deadReckoning;
 MotionQueue      motionQueue;
 LatencyCompensator latencyComp;
+UdpLogger        logger(udp, phoneIP, udpPort);
 
 // ============================================================================
 // Timing state
@@ -415,7 +417,7 @@ void applyMotors() {
 #if ENABLE_DEBUG_LOGGING
     static unsigned long lastDebugTime = 0;
     if (millis() - lastDebugTime >= 100) {
-        Serial.printf("[Motor Debug] M1:%d M2:%d M3:%d M4:%d | Target: V:%.2f H:%.2f A:%.2f\n",
+        logger.update("MOTORS", "M1:%d M2:%d M3:%d M4:%d | T: V:%.2f H:%.2f A:%.2f",
             s.m1, s.m2, s.m3, s.m4, V, H, A);
         lastDebugTime = millis();
     }
@@ -424,7 +426,7 @@ void applyMotors() {
 #ifdef TEST_MODE
     static unsigned long lastPrintTime = 0;
     if (millis() - lastPrintTime >= 500) {
-        Serial.printf("[TEST MODE] Virtual Motors: M1=%d, M2=%d, M3=%d, M4=%d  V=%.2f H=%.2f A=%.2f\n",
+        logger.update("TEST", "Virtual Motors: M1=%d, M2=%d, M3=%d, M4=%d  V=%.2f H=%.2f A=%.2f",
             s.m1, s.m2, s.m3, s.m4, V, H, A);
         lastPrintTime = millis();
     }
@@ -455,11 +457,11 @@ void handleParsedMessage(const UdpMessage &msg) {
                 cx, cy, c_angle
             );
             if (ok) {
-                Serial.printf("[CMD] MOVE queued: dir=%d dist=%d spd=%d policy=%d (queue=%d)\n",
+                logger.log("[CMD] MOVE: dir=%d dist=%d spd=%d policy=%d (q=%d)",
                     (int)msg.direction, msg.distance_mm, (int)msg.speed,
                     (int)msg.correctionPolicy, motionQueue.remaining());
             } else {
-                Serial.println("[CMD] MOVE rejected — queue full!");
+                logger.important("[ERR] MOVE rejected — queue full!");
             }
             break;
         }
@@ -474,11 +476,11 @@ void handleParsedMessage(const UdpMessage &msg) {
                 cx, cy, c_angle
             );
             if (ok) {
-                Serial.printf("[CMD] MOVE_DUR queued: dir=%d dur=%lums spd=%d policy=%d (queue=%d)\n",
+                logger.log("[CMD] MOVE_DUR: dir=%d dur=%lums spd=%d policy=%d (q=%d)",
                     (int)msg.direction, (unsigned long)msg.duration_ms, (int)msg.speed,
                     (int)msg.correctionPolicy, motionQueue.remaining());
             } else {
-                Serial.println("[CMD] MOVE_DUR rejected — queue full!");
+                logger.important("[ERR] MOVE_DUR rejected — queue full!");
             }
             break;
         }
@@ -493,11 +495,11 @@ void handleParsedMessage(const UdpMessage &msg) {
                 cx, cy, c_angle
             );
             if (ok) {
-                Serial.printf("[CMD] ROT_DUR queued: dir=%d dur=%lums spd=%d policy=%d (queue=%d)\n",
+                logger.log("[CMD] ROT_DUR: dir=%d dur=%lums spd=%d policy=%d (q=%d)",
                     (int)msg.rotationDirection, (unsigned long)msg.duration_ms, (int)msg.speed,
                     (int)msg.correctionPolicy, motionQueue.remaining());
             } else {
-                Serial.println("[CMD] ROT_DUR rejected — queue full!");
+                logger.important("[ERR] ROT_DUR rejected — queue full!");
             }
             break;
         }
@@ -527,19 +529,19 @@ void handleParsedMessage(const UdpMessage &msg) {
                     cx, cy, c_angle
                 );
                 if (ok) {
-                    Serial.printf("[CMD] WAYPOINT: (%.1f, %.1f) @ %.1f°\n",
+                    logger.log("[CMD] WAYPOINT: (%.1f, %.1f) @ %.1f°",
                         msg.target_x, msg.target_y, msg.target_angle);
                 } else {
-                    Serial.println("[CMD] WAYPOINT rejected — enqueue failed!");
+                    logger.important("[ERR] WAYPOINT rejected!");
                 }
             } else {
-                Serial.printf("[CMD] WAYPOINT same target — continuing decel\n");
+                logger.log("[CMD] WAYPOINT (same target) - continuing");
             }
             break;
         }
 
         case MsgType::DONE: {
-            Serial.println("[CMD] MISSION DONE!");
+            logger.important("[MISSION] DONE!");
             doneFeedbackBlinks = 4; // 2 full blinks (On-Off-On-Off)
             break;
         }
@@ -556,11 +558,11 @@ void handleParsedMessage(const UdpMessage &msg) {
                 cx, cy, c_angle
             );
             if (ok) {
-                Serial.printf("[CMD] ROTATE queued: target=%.1f spd=%d policy=%d (queue=%d)\n",
+                logger.log("[CMD] ROTATE: target=%.1f spd=%d policy=%d",
                     msg.target_angle, (int)msg.speed,
-                    (int)msg.correctionPolicy, motionQueue.remaining());
+                    (int)msg.correctionPolicy);
             } else {
-                Serial.println("[CMD] ROTATE rejected — queue full!");
+                logger.important("[ERR] ROTATE rejected!");
             }
             break;
         }
@@ -590,7 +592,7 @@ void handleParsedMessage(const UdpMessage &msg) {
         case MsgType::PONG: {
             // Include the remote (phone) timestamp to update our clock offset
             latencyComp.onPong(msg.ping_timestamp, msg.remote_timestamp);
-            Serial.printf("[RTT] %lu ms\n", (unsigned long)latencyComp.getRttMs());
+            logger.log("[RTT] %lu ms", (unsigned long)latencyComp.getRttMs());
             break;
         }
 
@@ -607,25 +609,32 @@ void handleParsedMessage(const UdpMessage &msg) {
                 cx, cy, c_angle
             );
             if (ok) {
-                Serial.printf("[CMD] VELOCITY: vx=%.1f vy=%.1f ω=%.1f timeout=%lums\n",
+                logger.log("[CMD] VELOCITY: vx=%.1f vy=%.1f ω=%.1f timeout=%lums",
                     msg.vel_vx, msg.vel_vy, msg.vel_omega,
                     (unsigned long)msg.duration_ms);
             } else {
-                Serial.println("[CMD] VELOCITY rejected — enqueue failed!");
+                logger.important("[ERR] VELOCITY rejected!");
             }
             break;
         }
 
         case MsgType::ABORT: {
-            Serial.println("[CMD] ABORT — emergency stop!");
+            logger.important("[CMD] ABORT — emergency stop!");
             motionQueue.abort();
             currentVx = currentVy = currentOmega = 0;
             abortFlag = true;   // Core 1 will stop motors immediately
             break;
         }
 
+        case MsgType::SET_SERIAL_MONITOR: {
+            bool enabled = msg.duration_ms != 0;
+            logger.setEnabled(enabled);
+            logger.log("[SYS] Serial Monitor %s", enabled ? "ENABLED" : "DISABLED");
+            break;
+        }
+
         default:
-            Serial.printf("[UDP] Unhandled message type: %d\n", (int)msg.type);
+            logger.log("[UDP] Unhandled message type: %d", (int)msg.type);
             break;
     }
 } // Added closing bracket here
@@ -699,6 +708,9 @@ void setup() {
     Serial.printf("  Robot IP:  %s\n", WiFi.localIP().toString().c_str());
     phoneIP = WiFi.gatewayIP();
     Serial.printf("  Phone IP:  %s\n", phoneIP.toString().c_str());
+    
+    logger.log("[SYS] Robot Online: %s", BOT_ID);
+    logger.log("[SYS] IP: %s", WiFi.localIP().toString().c_str());
 
     udp.begin(udpPort);
 
@@ -908,6 +920,7 @@ void loop() {
     // while the robot is busy with its servo sequence.
     if (actionToExecute != ServoAction::NONE) {
         Serial.printf("[SERVO] Executing Action: %d\n", (int)actionToExecute);
+        logger.log("[SERVO] Executing Action: %d", (int)actionToExecute);
         executeServoAction(actionToExecute);
         
         // Rearm kickstart because the motors have been stopped for a while

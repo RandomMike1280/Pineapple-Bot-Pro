@@ -38,6 +38,8 @@ enum class MsgType : uint8_t {
     MOVE_DURATION,
     ROTATE_DURATION,
     VELOCITY,
+    SET_SERIAL_MONITOR,
+    SERIAL_LOG,
     DONE,
     UNKNOWN
 };
@@ -146,6 +148,11 @@ int buildStatusMessage(char* buf, int maxLen,
 /// Build a REGISTER message: "R:<robot_id>:<caps>"
 int buildRegisterMessage(char* buf, int maxLen,
                          const char* robotId, const char* capabilities);
+
+/// Send a log message: "L:<S|U|I>[:<id>]:<msg>"
+/// Type: S=Static, U=Update-in-place, I=Important (Red)
+int buildLogMessage(char* buf, int maxLen,
+                    char type, const char* logId, const char* msg);
 
 // --- Helpers ---
 MoveDirection   parseDirection(const char* str);
