@@ -98,6 +98,12 @@
 // This compensates for momentum/drift before it becomes a large error.
 #define PREDICTIVE_LOOKAHEAD_S   0.15f    // seconds to predict ahead (0.15s ≈ 11mm at fast speed)
 
+// Predictive Braking — physics-based overshoot prevention
+// Uses observed closing speed and kinematic equation v² = 2*a*d to decide
+// if the robot can stop before the target.  If not, speed_scale is reduced.
+#define PREDICTIVE_BRAKE_DECEL_MM_S2   200.0f   // assumed deceleration capability (mm/s²)
+#define PREDICTIVE_BRAKE_SAFETY        1.5f     // safety margin (>1 = start braking earlier)
+
 // ============================================================================
 // S-Curve Trajectory Profile (Jerk-Limited Motion)
 // ============================================================================
@@ -182,6 +188,12 @@
 #define ROTATION_BRAKE_FRAMES   5
 #define ROTATION_BRAKE_DUTY     75
 #define ROTATION_BRAKE_MIN_OMEGA_DEG_S 5.0f
+
+// Translation active brake: reverse motors briefly to kill physical momentum
+// when the queue commands stop but the robot is still coasting.
+#define TRANSLATION_BRAKE_FRAMES      4       // frames of reverse thrust (~12ms at 333Hz)
+#define TRANSLATION_BRAKE_DUTY        55      // reverse duty (less than rotation — wheels grip better)
+#define TRANSLATION_BRAKE_MIN_SPEED_MM_S 5.0f // only brake if observed speed above this
 
 // Acceleration ramp: gradually increase motor duty at segment start
 // to synchronize wheel engagement and reduce drift from motor timing mismatch.

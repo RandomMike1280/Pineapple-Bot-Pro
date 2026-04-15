@@ -88,6 +88,9 @@ static float lastRotationOmegaDegS = 0;
 static int rotationBrakeFrames = 0;
 static int rotationBrakeDirection = 0;
 static bool suppressRotationBrake = false;
+static int translationBrakeFrames = 0;
+static float translationBrakeDirX = 0;  // normalized direction of observed velocity at brake start
+static float translationBrakeDirY = 0;
 static uint32_t motionIdleStartTime = 0;
 static const uint32_t motionCommandGapHoldMs = 40;
 static const float rampIncrement =
@@ -101,6 +104,9 @@ static void resetMotionControlState(bool suppressBrake) {
     rotationBrakeFrames = 0;
     rotationBrakeDirection = 0;
     suppressRotationBrake = suppressBrake;
+    translationBrakeFrames = 0;
+    translationBrakeDirX = 0;
+    translationBrakeDirY = 0;
     rearmKickstart();
     motionIdleStartTime = 0;
 }
@@ -152,7 +158,7 @@ MecanumSpeeds computeMecanumSpeeds(double V, double H, double A, bool lowSpeedMo
         // Near the target: skip kickstart and use a much lower duty floor.
         // This allows the robot to actually crawl at tiny velocities without
         // the kickstart/clamp re-inflating them to full duty (which causes wiggle).
-        int lowClamp = (DRIVE_CLAMP_LOW * 2) / 3;  // ~43 — above stall threshold but still gentle
+        int lowClamp = DRIVE_CLAMP_LOW;  // Same floor — motors won't turn below this. Anti-wiggle comes from no kickstart.
         for (int i = 0; i < 4; i++) {
             double absSpeed = abs(mspeedf[i]);
             if (absSpeed > 0 && absSpeed < lowClamp) {
@@ -228,6 +234,56 @@ void applyMotors() {
         return;
     }
 
+    // --- Active Translation Brake ---
+    // When the queue commands zero velocity but the robot is still physically
+    // moving (coasting), apply reverse motor thrust to kill all momentum.
+    // Uses Kalman-estimated velocity to determine brake direction.
+    if (!isMoving && motorWasMoving && !lastMotionWasRotationOnly &&
+        translationBrakeFrames == 0 && !suppressRotationBrake) {
+        float estVx, estVy;
+        motionQueue.getEstimatedVelocity(estVx, estVy);
+        float obsSpeed = sqrtf(estVx * estVx + estVy * estVy);
+        if (obsSpeed >= TRANSLATION_BRAKE_MIN_SPEED_MM_S) {
+            translationBrakeFrames = TRANSLATION_BRAKE_FRAMES;
+            translationBrakeDirX = estVx / obsSpeed;  // unit vector of coasting direction
+            translationBrakeDirY = estVy / obsSpeed;
+        }
+    }
+
+    if (!isMoving && translationBrakeFrames > 0) {
+        currentVx = 0;
+        currentVy = 0;
+        currentOmega = 0; // Decouple from dead-reckoning during brake
+        // Compute reverse motor command from brake direction
+        float cx, cy, c_angle;
+        deadReckoning.getCurrentPosition(cx, cy, c_angle);
+        double headingRad = c_angle * (PI / 180.0f);
+        double cosA = cos(headingRad);
+        double sinA = sin(headingRad);
+        // Reverse of observed velocity direction → brake thrust
+        double bV = -(translationBrakeDirX * cosA + translationBrakeDirY * sinA);
+        double bH = -(translationBrakeDirX * sinA - translationBrakeDirY * cosA);
+        // Scale to brake duty
+        double scale = (double)TRANSLATION_BRAKE_DUTY / (double)DRIVE_CLAMP_HIGH;
+        bV *= scale;
+        bH *= scale;
+        // Apply mecanum axis correction (same as normal path)
+        bV /= sqrt(2.0);
+        bH *= sqrt(2.0);
+        MecanumSpeeds bs = computeMecanumSpeeds(bV, bH, 0, false);
+#ifndef TEST_MODE
+        Motor1.Run(bs.m1);
+        Motor2.Run(bs.m2);
+        Motor3.Run(bs.m3);
+        Motor4.Run(bs.m4);
+#endif
+        translationBrakeFrames--;
+        if (translationBrakeFrames == 0) {
+            resetMotionControlState(false);
+        }
+        return;
+    }
+
     if (!isMoving) {
         if (motionIdleStartTime == 0) motionIdleStartTime = millis();
         // Gap-hold: keep previous velocity briefly to bridge timing gaps between segments.
@@ -262,6 +318,7 @@ void applyMotors() {
     }
     rotationBrakeFrames = 0;
     rotationBrakeDirection = 0;
+    translationBrakeFrames = 0;
 
     if (!motorWasMoving) {
         motorRampFactor = RAMP_START_FRACTION;
@@ -286,6 +343,12 @@ void applyMotors() {
 
     V *= motorRampFactor;
     H *= motorRampFactor;
+
+    // Mecanum wheels: vertical is √2× faster than horizontal for same motor duty.
+    // Divide V by √2 to slow vertical, multiply H by √2 to boost strafe.
+    // Both adjustments equalize physical speed between axes.
+    V /= sqrt(2.0);
+    H *= sqrt(2.0);
 
     // Drift trim: pre-rotate (V, H) CCW by a speed-dependent angle to counteract
     // the measured systematic leftward bias in translation.
@@ -658,6 +721,7 @@ void setup() {
                                      KALMAN_MEASUREMENT_NOISE);
     motionQueue.setSlipDetection(SLIP_CMD_SPEED_THRESH_MM_S, SLIP_OBS_SPEED_THRESH_MM_S,
                                   SLIP_DETECT_TICKS, SLIP_BOOST_FACTOR, SLIP_BOOST_MAX_TICKS);
+    motionQueue.setPredictiveBraking(PREDICTIVE_BRAKE_DECEL_MM_S2, PREDICTIVE_BRAKE_SAFETY);
 
     latencyComp.init(&deadReckoning, &motionQueue);
     latencyComp.setThresholds(DRIFT_THRESHOLD_MM, EMERGENCY_THRESHOLD_MM);

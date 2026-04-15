@@ -207,6 +207,9 @@ public:
     /// Get the feedforward compensation values (for motor layer)
     void getFeedforward(float &ff_vx, float &ff_vy, float &ff_omega) const;
 
+    /// Set predictive braking parameters (physics-based overshoot prevention)
+    void setPredictiveBraking(float decel_mm_s2, float safety_factor);
+
     /// Set anti-slip / stall detection parameters
     void setSlipDetection(float cmd_thresh, float obs_thresh, int detect_ticks,
                           float boost_factor, int boost_max_ticks);
@@ -359,6 +362,10 @@ private:
     KalmanAxis _kalmanX;
     KalmanAxis _kalmanY;
     bool _kalmanInitialized;
+
+    // Predictive braking — physics-based overshoot prevention
+    float _predictiveBrakeDecel;    // assumed deceleration capability (mm/s²)
+    float _predictiveBrakeSafety;   // safety margin factor (>1 = more conservative)
 
     // Anti-slip / stall detection
     float _slipCmdThresh;       // min commanded speed to monitor

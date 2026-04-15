@@ -27,6 +27,7 @@ MotionQueue::MotionQueue()
       _adaptLookaheadBaseS(0.06f), _adaptLookaheadGain(0.0022f),
       _adaptLookaheadMinS(0.04f), _adaptLookaheadMaxS(0.25f),
       _kalmanInitialized(false),
+      _predictiveBrakeDecel(200.0f), _predictiveBrakeSafety(1.5f),
       _slipCmdThresh(15.0f), _slipObsThresh(5.0f), _slipDetectTicks(25),
       _slipBoostFactor(1.35f), _slipBoostMaxTicks(40),
       _slipCounter(0), _slipBoostRemaining(0), _slipDetected(false),
@@ -101,6 +102,11 @@ void MotionQueue::setAdaptiveLookahead(float base_s, float gain, float min_s, fl
 void MotionQueue::setKalmanParameters(float q_pos, float q_vel, float r_meas) {
     _kalmanX.qPos = q_pos; _kalmanX.qVel = q_vel; _kalmanX.rMeas = r_meas;
     _kalmanY.qPos = q_pos; _kalmanY.qVel = q_vel; _kalmanY.rMeas = r_meas;
+}
+
+void MotionQueue::setPredictiveBraking(float decel_mm_s2, float safety_factor) {
+    _predictiveBrakeDecel = decel_mm_s2;
+    _predictiveBrakeSafety = safety_factor;
 }
 
 void MotionQueue::getFeedforward(float &ff_vx, float &ff_vy, float &ff_omega) const {
@@ -631,19 +637,25 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             float abs_heading_err = fabsf(heading_err);
             float speed_scale = 1.0f;
 
-            // Settling band threshold — within this, no min-speed floors apply
-            float settlingDist = _waypointToleranceMm * 3.0f;
+            // Settling band threshold — within this, a gentle min-speed floor applies
+            float settlingDist = _waypointToleranceMm * 4.0f;
             bool inSettlingBand = (dist_remaining < settlingDist);
 
             if (dist_remaining <= _waypointToleranceMm) {
                 speed_scale = 0.0f;
             } else if (inSettlingBand) {
-                // Inside settling band: aggressive linear ramp to zero.
-                // No precision min floor — allow speed to drop to near zero
-                // so the robot can actually stop instead of perpetually overshooting.
+                // Inside settling band: linear ramp toward zero with a minimum
+                // floor so the motors always have enough torque to actually move.
+                // Without the floor, the robot stalls a few mm from the target
+                // and requires a manual nudge to reach tolerance.
                 float settleNorm = (dist_remaining - _waypointToleranceMm)
                                  / (settlingDist - _waypointToleranceMm);
-                speed_scale = settleNorm * 0.35f; // gentle but above motor stall threshold
+                speed_scale = settleNorm * 0.5f;
+                // Floor: precision min speed keeps motors turning (especially for strafe)
+                if (seg.speed_mm_s > 0.001f) {
+                    float settleFloor = _precisionMinSpeedLimitMmS / seg.speed_mm_s;
+                    if (speed_scale < settleFloor) speed_scale = settleFloor;
+                }
             } else {
                 if (_deccelDistMm > 0.001f && dist_remaining < _deccelDistMm) {
                     float normalized = dist_remaining / _deccelDistMm;
@@ -689,6 +701,33 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
                 }
             }
 
+            // --- Predictive Braking ---
+            // Use Kalman-estimated velocity to compute closing speed toward target.
+            // If the robot is approaching faster than it can kinematically stop
+            // in the remaining distance, override speed_scale downward.
+            // v_safe = sqrt(2 * decel * dist) — max speed to stop in 'dist'.
+            // Never reduce below the settling band floor — the robot needs
+            // minimum torque to overcome static friction near the target.
+            if (dist_remaining > _waypointToleranceMm && _predictiveBrakeDecel > 0.001f) {
+                float inv_dist = 1.0f / dist_remaining;
+                // Closing speed = dot(observed_velocity, unit_vector_toward_target)
+                float closingSpeed = (_estVx * dx + _estVy * dy) * inv_dist;
+                if (closingSpeed > 1.0f) {
+                    // Kinematic braking limit (with safety margin)
+                    float effectiveDist = dist_remaining / _predictiveBrakeSafety;
+                    float vSafe = sqrtf(2.0f * _predictiveBrakeDecel * effectiveDist);
+                    if (closingSpeed > vSafe && seg.speed_mm_s > 0.001f) {
+                        float brake_scale = vSafe / seg.speed_mm_s;
+                        // Don't clamp below settling band floor
+                        float minBrakeScale = _precisionMinSpeedLimitMmS / seg.speed_mm_s;
+                        if (brake_scale < minBrakeScale) brake_scale = minBrakeScale;
+                        if (brake_scale < speed_scale) {
+                            speed_scale = brake_scale;
+                        }
+                    }
+                }
+            }
+
             // --- Adaptive Predictive Steering ---
             // Only use prediction OUTSIDE the close-approach zone.
             // Inside close-approach, prediction causes aim-vector flipping/wiggle.
@@ -714,7 +753,7 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             // In settling band (within 4× tolerance) or at zero target:
             // bypass S-curve and use raw speed directly — prevents ramp-down
             // tail from coasting through the target and causing wiggle.
-            if (rawTransSpeed < 0.001f || dist_remaining < _waypointToleranceMm * 3.0f) {
+            if (rawTransSpeed < 0.001f || dist_remaining < _waypointToleranceMm * 4.0f) {
                 profiledTransSpeed = rawTransSpeed;
                 _scurveTrans.profiledSpeed = rawTransSpeed;
                 _scurveTrans.prevProfiledSpeed = rawTransSpeed;
