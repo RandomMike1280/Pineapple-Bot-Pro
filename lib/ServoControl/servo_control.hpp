@@ -1,7 +1,7 @@
 #ifndef SERVO_CONTROL_HPP
 #define SERVO_CONTROL_HPP
 
-#include <UdpProtocol/udp_protocol.hpp>
+#include <udp_protocol.hpp>
 
 /**
  * Initialize servos and set them to their default states:

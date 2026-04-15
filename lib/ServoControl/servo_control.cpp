@@ -1,5 +1,5 @@
 #include "servo_control.hpp"
-#include <ESP32_Servo_Controller/esp32_servo.hpp>
+#include <esp32_servo.hpp>
 #include <Arduino.h>
 
 #define GRABBER_ANGLE    45

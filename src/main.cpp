@@ -872,10 +872,12 @@ void loop() {
         if (motionQueue.getActivePolicy() == CorrectionPolicy::DEFERRED) {
             float dcX, dcY, dcA;
             motionQueue.getDeferredCorrection(dcX, dcY, dcA);
-            latencyComp.applyCorrection(dcX, dcY, dcA, CORRECTION_BLEND_MS);
+            // Apply deferred correction as a new anchor on dead reckoning
+            float gx, gy, ga;
+            deadReckoning.getCurrentPosition(gx, gy, ga);
+            deadReckoning.setAnchor(gx + dcX, gy + dcY, ga + dcA, millis());
         }
     }
-
 
     // ---- Handle emergency deceleration ----
     if (latencyComp.wasEmergencyTriggered() && moving) {
