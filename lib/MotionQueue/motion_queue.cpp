@@ -631,8 +631,19 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             float abs_heading_err = fabsf(heading_err);
             float speed_scale = 1.0f;
 
+            // Settling band threshold — within this, no min-speed floors apply
+            float settlingDist = _waypointToleranceMm * 3.0f;
+            bool inSettlingBand = (dist_remaining < settlingDist);
+
             if (dist_remaining <= _waypointToleranceMm) {
                 speed_scale = 0.0f;
+            } else if (inSettlingBand) {
+                // Inside settling band: aggressive linear ramp to zero.
+                // No precision min floor — allow speed to drop to near zero
+                // so the robot can actually stop instead of perpetually overshooting.
+                float settleNorm = (dist_remaining - _waypointToleranceMm)
+                                 / (settlingDist - _waypointToleranceMm);
+                speed_scale = settleNorm * 0.35f; // gentle but above motor stall threshold
             } else {
                 if (_deccelDistMm > 0.001f && dist_remaining < _deccelDistMm) {
                     float normalized = dist_remaining / _deccelDistMm;
@@ -654,7 +665,7 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
                         speed_scale *= heading_scale;
                     }
 
-                    // Re-enforce precision min floor AFTER heading reduction
+                    // Precision min floor only OUTSIDE settling band
                     if (seg.speed_mm_s > 0.001f) {
                         float precision_min_scale = _precisionMinSpeedLimitMmS / seg.speed_mm_s;
                         if (speed_scale < precision_min_scale) speed_scale = precision_min_scale;
@@ -700,10 +711,10 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             float rawTransSpeed = seg.speed_mm_s * speed_scale;
             float profiledTransSpeed;
 
-            // In settling band (within 2× tolerance) or at zero target:
+            // In settling band (within 4× tolerance) or at zero target:
             // bypass S-curve and use raw speed directly — prevents ramp-down
             // tail from coasting through the target and causing wiggle.
-            if (rawTransSpeed < 0.001f || dist_remaining < _waypointToleranceMm * 2.5f) {
+            if (rawTransSpeed < 0.001f || dist_remaining < _waypointToleranceMm * 3.0f) {
                 profiledTransSpeed = rawTransSpeed;
                 _scurveTrans.profiledSpeed = rawTransSpeed;
                 _scurveTrans.prevProfiledSpeed = rawTransSpeed;
@@ -728,38 +739,51 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             }
 
             // --- Active Heading Stabilization ---
-            // Calculate error between actual heading and segment's target angle
+            // Calculate error between actual heading and segment's target angle.
+            // Taper gain DOWN in close-approach to avoid rotational disturbance
+            // that causes wiggle during combined translation+rotation maneuvers.
             float stabilization_gain = _rotStabilizationGain;
             if (_closeApproachDistMm > 0.001f && dist_remaining < _closeApproachDistMm) {
-                float close_mix = 1.0f - (dist_remaining / _closeApproachDistMm);
-                if (close_mix < 0.0f) close_mix = 0.0f;
-                if (close_mix > 1.0f) close_mix = 1.0f;
-                stabilization_gain *= 1.0f + (0.5f * close_mix);
+                float close_mix = dist_remaining / _closeApproachDistMm;
+                if (close_mix < 0.4f) close_mix = 0.4f; // don't go below 40%
+                stabilization_gain *= close_mix;
             }
 
             _currentOmega = heading_err * stabilization_gain;
             // Only apply rotation FF during accel; during decel it causes heading wobble
             _ffOmega = (transAccel > 0.0f) ? (_ffKvRot * fabsf(_currentOmega)) : 0.0f;
 
-            // Clamp stabilization power to prevent violent shakes
-            if (_currentOmega > _maxStabilizationOmega) _currentOmega = _maxStabilizationOmega;
-            if (_currentOmega < -_maxStabilizationOmega) _currentOmega = -_maxStabilizationOmega;
+            // Clamp stabilization power — taper max omega in close approach
+            float maxOmegaClamp = _maxStabilizationOmega;
+            if (_closeApproachDistMm > 0.001f && dist_remaining < _closeApproachDistMm) {
+                float omegaTaper = 0.4f + 0.6f * (dist_remaining / _closeApproachDistMm);
+                maxOmegaClamp *= omegaTaper;
+            }
+            if (_currentOmega > maxOmegaClamp) _currentOmega = maxOmegaClamp;
+            if (_currentOmega < -maxOmegaClamp) _currentOmega = -maxOmegaClamp;
 
             // Anti-stall: if translation speed is non-zero but below the precision
-            // minimum, boost it so motors can overcome static friction
-            float cmdSpd = sqrtf(_currentVx * _currentVx + _currentVy * _currentVy);
-            if (cmdSpd > 0.001f && cmdSpd < _precisionMinSpeedLimitMmS) {
-                float boost = _precisionMinSpeedLimitMmS / cmdSpd;
-                _currentVx *= boost;
-                _currentVy *= boost;
+            // minimum, boost it so motors can overcome static friction.
+            // DISABLED inside settling band — near the target we WANT low speed.
+            if (!inSettlingBand) {
+                float cmdSpd = sqrtf(_currentVx * _currentVx + _currentVy * _currentVy);
+                if (cmdSpd > 0.001f && cmdSpd < _precisionMinSpeedLimitMmS) {
+                    float boost = _precisionMinSpeedLimitMmS / cmdSpd;
+                    _currentVx *= boost;
+                    _currentVy *= boost;
+                }
             }
         }
     }
 
     // --- SLIP / STALL DETECTION ---
     // Compare commanded speed vs Kalman-observed speed.
-    // If commanding significant motion but not actually moving, count ticks.
-    if (!seg.isDurationBased) {
+    // Only check when NOT in settling band — near the target, low speed is expected.
+    bool isTranslation = !(seg.vx_mm_s == 0 && seg.vy_mm_s == 0 && seg.omega_deg_s != 0);
+    float slipDistCheck = isTranslation ? sqrtf(
+        (seg.target_x - current_x) * (seg.target_x - current_x) +
+        (seg.target_y - current_y) * (seg.target_y - current_y)) : 999.0f;
+    if (!seg.isDurationBased && slipDistCheck > _waypointToleranceMm * 4.0f) {
         float cmdSpeed = sqrtf(_currentVx * _currentVx + _currentVy * _currentVy);
         float obsSpeed = sqrtf(_estVx * _estVx + _estVy * _estVy);
 
@@ -805,13 +829,17 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             float dy = seg.target_y - current_y;
             float dist_remaining = sqrtf(dx * dx + dy * dy);
             
-            // Simultaneous completion check: require both position and orientation
+            // Simultaneous completion check: position + orientation + velocity gate.
+            // The velocity gate prevents declaring "done" while the robot is still
+            // moving fast through the tolerance zone (momentum overshoot).
             float heading_err = seg.target_angle - current_angle;
             while (heading_err > 180.0f) heading_err -= 360.0f;
             while (heading_err < -180.0f) heading_err += 360.0f;
 
+            float obsSpd = sqrtf(_estVx * _estVx + _estVy * _estVy);
             if (dist_remaining <= _waypointToleranceMm &&
-                fabsf(heading_err) <= _rotToleranceDeg) {
+                fabsf(heading_err) <= _rotToleranceDeg &&
+                obsSpd < _precisionMinSpeedLimitMmS * 1.5f) {
                 done = true;
             }
         }

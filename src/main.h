@@ -205,6 +205,6 @@ struct MecanumSpeeds {
 /// Compute individual motor duties from normalized velocity components.
 /// V = forward/backward (-1..1), H = strafe (-1..1), A = rotation (-1..1)
 /// Applies speed_to_motor_duty, normalization, and kickstart.
-MecanumSpeeds computeMecanumSpeeds(double V, double H, double A);
+MecanumSpeeds computeMecanumSpeeds(double V, double H, double A, bool lowSpeedMode = false);
 
 #endif // MAIN_H

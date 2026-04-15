@@ -118,7 +118,7 @@ int speed_to_motor_duty(double speed) {
     return 0;
 }
 
-MecanumSpeeds computeMecanumSpeeds(double V, double H, double A) {
+MecanumSpeeds computeMecanumSpeeds(double V, double H, double A, bool lowSpeedMode) {
     MecanumSpeeds s;
     double mspeedf[4];
 
@@ -148,20 +148,34 @@ MecanumSpeeds computeMecanumSpeeds(double V, double H, double A) {
         }
     }
 
-    // Kickstart: briefly boost duty to overcome static friction
-    // Damping: scale the kickstart power proportional to requested speed
-    for (int i = 0; i < 4; i++) {
-        double absSpeed = abs(mspeedf[i]);
-        if (absSpeed < DRIVE_CLAMP_LOW && absSpeed > 0) {
-            mkickstart[i] = KICKSTART_FRAMES;
+    if (lowSpeedMode) {
+        // Near the target: skip kickstart and use a much lower duty floor.
+        // This allows the robot to actually crawl at tiny velocities without
+        // the kickstart/clamp re-inflating them to full duty (which causes wiggle).
+        int lowClamp = (DRIVE_CLAMP_LOW * 2) / 3;  // ~43 — above stall threshold but still gentle
+        for (int i = 0; i < 4; i++) {
+            double absSpeed = abs(mspeedf[i]);
+            if (absSpeed > 0 && absSpeed < lowClamp) {
+                mspeedf[i] = sign(mspeedf[i]) * lowClamp;
+            }
         }
-        if (mkickstart[i] > 0) {
-            mkickstart[i]--;
-            // Scale kickstart power between [CLAMP_LOW, KICKSTART_SPEED] based on target speed
-            double kickPower = DRIVE_CLAMP_LOW + (absSpeed / 100.0) * (KICKSTART_SPEED - DRIVE_CLAMP_LOW);
-            mspeedf[i] = sign(mspeedf[i]) * max(kickPower, absSpeed);
-        } else if (absSpeed > 0) {
-            mspeedf[i] = sign(mspeedf[i]) * max((double)DRIVE_CLAMP_LOW, absSpeed);
+        // Don't rearm kickstart in low-speed mode
+    } else {
+        // Kickstart: briefly boost duty to overcome static friction
+        // Damping: scale the kickstart power proportional to requested speed
+        for (int i = 0; i < 4; i++) {
+            double absSpeed = abs(mspeedf[i]);
+            if (absSpeed < DRIVE_CLAMP_LOW && absSpeed > 0) {
+                mkickstart[i] = KICKSTART_FRAMES;
+            }
+            if (mkickstart[i] > 0) {
+                mkickstart[i]--;
+                // Scale kickstart power between [CLAMP_LOW, KICKSTART_SPEED] based on target speed
+                double kickPower = DRIVE_CLAMP_LOW + (absSpeed / 100.0) * (KICKSTART_SPEED - DRIVE_CLAMP_LOW);
+                mspeedf[i] = sign(mspeedf[i]) * max(kickPower, absSpeed);
+            } else if (absSpeed > 0) {
+                mspeedf[i] = sign(mspeedf[i]) * max((double)DRIVE_CLAMP_LOW, absSpeed);
+            }
         }
     }
 
@@ -216,7 +230,11 @@ void applyMotors() {
 
     if (!isMoving) {
         if (motionIdleStartTime == 0) motionIdleStartTime = millis();
-        if (motorWasMoving && (millis() - motionIdleStartTime) <= motionCommandGapHoldMs) {
+        // Gap-hold: keep previous velocity briefly to bridge timing gaps between segments.
+        // Skip this in HOLDING state — we've arrived and want instant stop, not coasting.
+        const MotionSegment* holdSeg = motionQueue.currentSegment();
+        bool isHolding = holdSeg && holdSeg->state == SegmentState::HOLDING;
+        if (!isHolding && motorWasMoving && (millis() - motionIdleStartTime) <= motionCommandGapHoldMs) {
             currentVx = prevCurrentVx;
             currentVy = prevCurrentVy;
             currentOmega = prevCurrentOmega;
@@ -324,7 +342,11 @@ void applyMotors() {
         A += -ffOmega / SPEED_FAST_DEG_S;
     }
 
-    MecanumSpeeds s = computeMecanumSpeeds(V, H, A);
+    // Detect settling band: commanded speed is very low → use low-speed motor mode
+    // to prevent kickstart and DRIVE_CLAMP_LOW from re-inflating tiny velocities
+    float cmdMag = sqrtf(vx * vx + vy * vy);
+    bool lowSpeedMode = (cmdMag > 0.001f && cmdMag < 10.0f);  // below ~10 mm/s
+    MecanumSpeeds s = computeMecanumSpeeds(V, H, A, lowSpeedMode);
 
 #if ENABLE_DEBUG_LOGGING
     static unsigned long lastDebugTime = 0;
@@ -427,8 +449,8 @@ void handleParsedMessage(const UdpMessage &msg) {
             const MotionSegment* cur = motionQueue.currentSegment();
             bool sameTarget = (cur != nullptr &&
                                !cur->isDurationBased &&
-                               cur->state == SegmentState::ACTIVE && // HOLDING must allow re-launch
-                               (cur->vx_mm_s != 0.0f || cur->vy_mm_s != 0.0f) &&
+                               (cur->state == SegmentState::ACTIVE ||
+                                cur->state == SegmentState::HOLDING) &&
                                fabsf(cur->target_x - msg.target_x) < 15.0f &&
                                fabsf(cur->target_y - msg.target_y) < 15.0f);
 
