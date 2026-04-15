@@ -63,14 +63,21 @@ void DeadReckoning::setAnchor(float worldX, float worldY, float worldAngle, uint
     float odoX, odoY, odoA;
     if (getPositionAt(captureTime, odoX, odoY, odoA)) {
         // We found exactly what our odo was doing when the photo was taken.
-        // Update the anchor.
         _gx = worldX;
         _gy = worldY;
         _ga = Rotation(worldAngle);
-
         _ax = odoX;
         _ay = odoY;
         _aa = Rotation(odoA);
+    } else {
+        // Capture time is outside our history window — use current odo as fallback.
+        // This is slightly less accurate but ensures the correction is always applied.
+        _gx = worldX;
+        _gy = worldY;
+        _ga = Rotation(worldAngle);
+        _ax = _ix;
+        _ay = _iy;
+        _aa = Rotation(_ia);
     }
 }
 

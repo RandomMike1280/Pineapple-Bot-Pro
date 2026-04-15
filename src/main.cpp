@@ -18,6 +18,7 @@
 #include <motion_queue.hpp>
 #include <latency_compensator.hpp>
 #include <udp_protocol.hpp>
+#include <servo_control.hpp>
 
 // ============================================================================
 // WiFi Configuration
@@ -43,6 +44,8 @@ uint32_t lastTick       = 0;
 uint32_t lastHelloTime  = 0;
 uint32_t lastStatusTime = 0;
 uint32_t lastPingTime   = 0;
+static int doneFeedbackBlinks = 0;
+static uint32_t lastFeedbackToggleTime = 0;
 
 // ============================================================================
 // Latency / Correction Tuning
@@ -88,6 +91,9 @@ static float lastRotationOmegaDegS = 0;
 static int rotationBrakeFrames = 0;
 static int rotationBrakeDirection = 0;
 static bool suppressRotationBrake = false;
+static int translationBrakeFrames = 0;
+static float translationBrakeDirX = 0;  // normalized direction of observed velocity at brake start
+static float translationBrakeDirY = 0;
 static uint32_t motionIdleStartTime = 0;
 static const uint32_t motionCommandGapHoldMs = 40;
 static const float rampIncrement =
@@ -101,6 +107,9 @@ static void resetMotionControlState(bool suppressBrake) {
     rotationBrakeFrames = 0;
     rotationBrakeDirection = 0;
     suppressRotationBrake = suppressBrake;
+    translationBrakeFrames = 0;
+    translationBrakeDirX = 0;
+    translationBrakeDirY = 0;
     rearmKickstart();
     motionIdleStartTime = 0;
 }
@@ -118,7 +127,7 @@ int speed_to_motor_duty(double speed) {
     return 0;
 }
 
-MecanumSpeeds computeMecanumSpeeds(double V, double H, double A) {
+MecanumSpeeds computeMecanumSpeeds(double V, double H, double A, bool lowSpeedMode) {
     MecanumSpeeds s;
     double mspeedf[4];
 
@@ -148,20 +157,34 @@ MecanumSpeeds computeMecanumSpeeds(double V, double H, double A) {
         }
     }
 
-    // Kickstart: briefly boost duty to overcome static friction
-    // Damping: scale the kickstart power proportional to requested speed
-    for (int i = 0; i < 4; i++) {
-        double absSpeed = abs(mspeedf[i]);
-        if (absSpeed < DRIVE_CLAMP_LOW && absSpeed > 0) {
-            mkickstart[i] = KICKSTART_FRAMES;
+    if (lowSpeedMode) {
+        // Near the target: skip kickstart and use a much lower duty floor.
+        // This allows the robot to actually crawl at tiny velocities without
+        // the kickstart/clamp re-inflating them to full duty (which causes wiggle).
+        int lowClamp = DRIVE_CLAMP_LOW;  // Same floor — motors won't turn below this. Anti-wiggle comes from no kickstart.
+        for (int i = 0; i < 4; i++) {
+            double absSpeed = abs(mspeedf[i]);
+            if (absSpeed > 0 && absSpeed < lowClamp) {
+                mspeedf[i] = sign(mspeedf[i]) * lowClamp;
+            }
         }
-        if (mkickstart[i] > 0) {
-            mkickstart[i]--;
-            // Scale kickstart power between [CLAMP_LOW, KICKSTART_SPEED] based on target speed
-            double kickPower = DRIVE_CLAMP_LOW + (absSpeed / 100.0) * (KICKSTART_SPEED - DRIVE_CLAMP_LOW);
-            mspeedf[i] = sign(mspeedf[i]) * max(kickPower, absSpeed);
-        } else if (absSpeed > 0) {
-            mspeedf[i] = sign(mspeedf[i]) * max((double)DRIVE_CLAMP_LOW, absSpeed);
+        // Don't rearm kickstart in low-speed mode
+    } else {
+        // Kickstart: briefly boost duty to overcome static friction
+        // Damping: scale the kickstart power proportional to requested speed
+        for (int i = 0; i < 4; i++) {
+            double absSpeed = abs(mspeedf[i]);
+            if (absSpeed < DRIVE_CLAMP_LOW && absSpeed > 0) {
+                mkickstart[i] = KICKSTART_FRAMES;
+            }
+            if (mkickstart[i] > 0) {
+                mkickstart[i]--;
+                // Scale kickstart power between [CLAMP_LOW, KICKSTART_SPEED] based on target speed
+                double kickPower = DRIVE_CLAMP_LOW + (absSpeed / 100.0) * (KICKSTART_SPEED - DRIVE_CLAMP_LOW);
+                mspeedf[i] = sign(mspeedf[i]) * max(kickPower, absSpeed);
+            } else if (absSpeed > 0) {
+                mspeedf[i] = sign(mspeedf[i]) * max((double)DRIVE_CLAMP_LOW, absSpeed);
+            }
         }
     }
 
@@ -214,9 +237,62 @@ void applyMotors() {
         return;
     }
 
+    // --- Active Translation Brake ---
+    // When the queue commands zero velocity but the robot is still physically
+    // moving (coasting), apply reverse motor thrust to kill all momentum.
+    // Uses Kalman-estimated velocity to determine brake direction.
+    if (!isMoving && motorWasMoving && !lastMotionWasRotationOnly &&
+        translationBrakeFrames == 0 && !suppressRotationBrake) {
+        float estVx, estVy;
+        motionQueue.getEstimatedVelocity(estVx, estVy);
+        float obsSpeed = sqrtf(estVx * estVx + estVy * estVy);
+        if (obsSpeed >= TRANSLATION_BRAKE_MIN_SPEED_MM_S) {
+            translationBrakeFrames = TRANSLATION_BRAKE_FRAMES;
+            translationBrakeDirX = estVx / obsSpeed;  // unit vector of coasting direction
+            translationBrakeDirY = estVy / obsSpeed;
+        }
+    }
+
+    if (!isMoving && translationBrakeFrames > 0) {
+        currentVx = 0;
+        currentVy = 0;
+        currentOmega = 0; // Decouple from dead-reckoning during brake
+        // Compute reverse motor command from brake direction
+        float cx, cy, c_angle;
+        deadReckoning.getCurrentPosition(cx, cy, c_angle);
+        double headingRad = c_angle * (PI / 180.0f);
+        double cosA = cos(headingRad);
+        double sinA = sin(headingRad);
+        // Reverse of observed velocity direction → brake thrust
+        double bV = -(translationBrakeDirX * cosA + translationBrakeDirY * sinA);
+        double bH = -(translationBrakeDirX * sinA - translationBrakeDirY * cosA);
+        // Scale to brake duty
+        double scale = (double)TRANSLATION_BRAKE_DUTY / (double)DRIVE_CLAMP_HIGH;
+        bV *= scale;
+        bH *= scale;
+        // Apply mecanum axis correction (same as normal path)
+        bH /= sqrt(2.0);
+        MecanumSpeeds bs = computeMecanumSpeeds(bV, bH, 0, false);
+#ifndef TEST_MODE
+        Motor1.Run(bs.m1);
+        Motor2.Run(bs.m2);
+        Motor3.Run(bs.m3);
+        Motor4.Run(bs.m4);
+#endif
+        translationBrakeFrames--;
+        if (translationBrakeFrames == 0) {
+            resetMotionControlState(false);
+        }
+        return;
+    }
+
     if (!isMoving) {
         if (motionIdleStartTime == 0) motionIdleStartTime = millis();
-        if (motorWasMoving && (millis() - motionIdleStartTime) <= motionCommandGapHoldMs) {
+        // Gap-hold: keep previous velocity briefly to bridge timing gaps between segments.
+        // Skip this in HOLDING state — we've arrived and want instant stop, not coasting.
+        const MotionSegment* holdSeg = motionQueue.currentSegment();
+        bool isHolding = holdSeg && holdSeg->state == SegmentState::HOLDING;
+        if (!isHolding && motorWasMoving && (millis() - motionIdleStartTime) <= motionCommandGapHoldMs) {
             currentVx = prevCurrentVx;
             currentVy = prevCurrentVy;
             currentOmega = prevCurrentOmega;
@@ -244,6 +320,7 @@ void applyMotors() {
     }
     rotationBrakeFrames = 0;
     rotationBrakeDirection = 0;
+    translationBrakeFrames = 0;
 
     if (!motorWasMoving) {
         motorRampFactor = RAMP_START_FRACTION;
@@ -268,6 +345,11 @@ void applyMotors() {
 
     V *= motorRampFactor;
     H *= motorRampFactor;
+
+    // Mecanum wheels: H=forward(vertical) is √2× faster than V=strafe(horizontal).
+    // Divide H by √2 to slow vertical to match horizontal's natural speed.
+    // Don't boost V — horizontal is already reliable at its natural speed.
+    H /= sqrt(2.0);
 
     // Drift trim: pre-rotate (V, H) CCW by a speed-dependent angle to counteract
     // the measured systematic leftward bias in translation.
@@ -309,7 +391,26 @@ void applyMotors() {
         A *= rotationOnly ? 1.0 : motorRampFactor;
     }
 
-    MecanumSpeeds s = computeMecanumSpeeds(V, H, A);
+    // --- Feedforward compensation from S-curve profiler ---
+    // Add acceleration-proportional terms to overcome inertia/friction
+    float ffVx, ffVy, ffOmega;
+    motionQueue.getFeedforward(ffVx, ffVy, ffOmega);
+    if (SPEED_FAST_MM_S > 0.1f) {
+        double headingRad = c_angle * (PI / 180.0f);
+        double cosA = cos(headingRad);
+        double sinA = sin(headingRad);
+        V += (ffVx * cosA + ffVy * sinA) / SPEED_FAST_MM_S;
+        H += (ffVx * sinA - ffVy * cosA) / SPEED_FAST_MM_S;
+    }
+    if (SPEED_FAST_DEG_S > 0.1f) {
+        A += -ffOmega / SPEED_FAST_DEG_S;
+    }
+
+    // Detect settling band: commanded speed is very low → use low-speed motor mode
+    // to prevent kickstart and DRIVE_CLAMP_LOW from re-inflating tiny velocities
+    float cmdMag = sqrtf(vx * vx + vy * vy);
+    bool lowSpeedMode = (cmdMag > 0.001f && cmdMag < 10.0f);  // below ~10 mm/s
+    MecanumSpeeds s = computeMecanumSpeeds(V, H, A, lowSpeedMode);
 
 #if ENABLE_DEBUG_LOGGING
     static unsigned long lastDebugTime = 0;
@@ -350,7 +451,7 @@ void handleParsedMessage(const UdpMessage &msg) {
 
             bool ok = motionQueue.enqueue(
                 msg.direction, msg.distance_mm,
-                msg.speed, msg.correctionPolicy,
+                msg.speed, msg.correctionPolicy, msg.servoAction,
                 cx, cy, c_angle
             );
             if (ok) {
@@ -412,16 +513,17 @@ void handleParsedMessage(const UdpMessage &msg) {
             const MotionSegment* cur = motionQueue.currentSegment();
             bool sameTarget = (cur != nullptr &&
                                !cur->isDurationBased &&
-                               cur->state == SegmentState::ACTIVE && // HOLDING must allow re-launch
-                               (cur->vx_mm_s != 0.0f || cur->vy_mm_s != 0.0f) &&
+                               (cur->state == SegmentState::ACTIVE ||
+                                cur->state == SegmentState::HOLDING) &&
                                fabsf(cur->target_x - msg.target_x) < 15.0f &&
-                               fabsf(cur->target_y - msg.target_y) < 15.0f);
+                               fabsf(cur->target_y - msg.target_y) < 15.0f &&
+                               msg.servoAction == ServoAction::NONE);
 
             if (!sameTarget) {
                 motionQueue.abort();
                 bool ok = motionQueue.enqueueWaypoint(
                     msg.target_x, msg.target_y, msg.target_angle,
-                    msg.speed, msg.correctionPolicy,
+                    msg.speed, msg.correctionPolicy, msg.servoAction,
                     cx, cy, c_angle
                 );
                 if (ok) {
@@ -433,6 +535,12 @@ void handleParsedMessage(const UdpMessage &msg) {
             } else {
                 Serial.printf("[CMD] WAYPOINT same target — continuing decel\n");
             }
+            break;
+        }
+
+        case MsgType::DONE: {
+            Serial.println("[CMD] MISSION DONE!");
+            doneFeedbackBlinks = 4; // 2 full blinks (On-Off-On-Off)
             break;
         }
 
@@ -520,7 +628,7 @@ void handleParsedMessage(const UdpMessage &msg) {
             Serial.printf("[UDP] Unhandled message type: %d\n", (int)msg.type);
             break;
     }
-}
+} // Added closing bracket here
 
 // ============================================================================
 // Send telemetry status to phone (every STATUS_INTERVAL_MS)
@@ -529,11 +637,16 @@ void sendStatus() {
     float x, y, angle;
     deadReckoning.getCurrentPosition(x, y, angle);
 
-    char buf[64];
+    // Get estimated velocity from MotionQueue for visualization
+    float vx, vy;
+    motionQueue.getEstimatedVelocity(vx, vy);
+
+    char buf[80];
     int len = buildStatusMessage(buf, sizeof(buf),
         x, y, angle,
         motionQueue.remaining(),
-        latencyComp.getLastDriftMagnitude()
+        latencyComp.getLastDriftMagnitude(),
+        vx, vy
     );
 
     udp.beginPacket(phoneIP, udpPort);
@@ -593,6 +706,11 @@ void setup() {
     deadReckoning.reset(0, 0, 0);
     deadReckoning.setDistanceFactors(DISTANCE_FACTOR_H, DISTANCE_FACTOR_V);
 
+    initServoControl();
+    
+    pinMode(LED, OUTPUT);
+    digitalWrite(LED, LOW);
+
     Motor1.Reverse();
     Motor2.Reverse();
 
@@ -605,6 +723,18 @@ void setup() {
                                        CLOSE_APPROACH_DISTANCE_MM, CLOSE_ROT_APPROACH_DEG,
                                        WAYPOINT_TOLERANCE_MM, ROTATION_TOLERANCE_DEG,
                                        STABILIZATION_GAIN, MAX_STABILIZATION_OMEGA);
+    motionQueue.setPredictiveParameters(PREDICTIVE_LOOKAHEAD_S);
+    motionQueue.setSCurveParameters(SCURVE_MAX_ACCEL_MM_S2, SCURVE_MAX_JERK_MM_S3,
+                                     SCURVE_MAX_ROT_ACCEL_DEG_S2, SCURVE_MAX_ROT_JERK_DEG_S3);
+    motionQueue.setFeedforwardGains(FEEDFORWARD_KV, FEEDFORWARD_KA,
+                                     FEEDFORWARD_KV_ROT, FEEDFORWARD_KA_ROT);
+    motionQueue.setAdaptiveLookahead(ADAPTIVE_LOOKAHEAD_BASE_S, ADAPTIVE_LOOKAHEAD_GAIN,
+                                      ADAPTIVE_LOOKAHEAD_MIN_S, ADAPTIVE_LOOKAHEAD_MAX_S);
+    motionQueue.setKalmanParameters(KALMAN_PROCESS_NOISE_POS, KALMAN_PROCESS_NOISE_VEL,
+                                     KALMAN_MEASUREMENT_NOISE);
+    motionQueue.setSlipDetection(SLIP_CMD_SPEED_THRESH_MM_S, SLIP_OBS_SPEED_THRESH_MM_S,
+                                  SLIP_DETECT_TICKS, SLIP_BOOST_FACTOR, SLIP_BOOST_MAX_TICKS);
+    motionQueue.setPredictiveBraking(PREDICTIVE_BRAKE_DECEL_MM_S2, PREDICTIVE_BRAKE_SAFETY);
 
     latencyComp.init(&deadReckoning, &motionQueue);
     latencyComp.setThresholds(DRIFT_THRESHOLD_MM, EMERGENCY_THRESHOLD_MM);
@@ -743,6 +873,21 @@ void loop() {
     deadReckoning.getCurrentPosition(current_x, current_y, current_angle);
     bool moving = motionQueue.tick(dt, current_x, current_y, current_angle);
 
+    ServoAction actionToExecute = ServoAction::NONE;
+    if (motionQueue.segmentJustCompleted) {
+        actionToExecute = motionQueue.getLastCompletedServoAction();
+        // Clear flag now that we've captured the action
+        motionQueue.segmentJustCompleted = false;
+
+        if (motionQueue.getActivePolicy() == CorrectionPolicy::DEFERRED) {
+            float dcX, dcY, dcA;
+            motionQueue.getDeferredCorrection(dcX, dcY, dcA);
+            // Apply deferred correction as a new anchor on dead reckoning
+            float gx, gy, ga;
+            deadReckoning.getCurrentPosition(gx, gy, ga);
+            deadReckoning.setAnchor(gx + dcX, gy + dcY, ga + dcA, millis());
+        }
+    }
 
     // ---- Handle emergency deceleration ----
     if (latencyComp.wasEmergencyTriggered() && moving) {
@@ -758,6 +903,17 @@ void loop() {
 
     xSemaphoreGive(stateMutex);
 
+    // ---- Execution (OUTSIDE mutex) ----
+    // This allows Core 0 to handle heartbeats and new waypoint commands 
+    // while the robot is busy with its servo sequence.
+    if (actionToExecute != ServoAction::NONE) {
+        Serial.printf("[SERVO] Executing Action: %d\n", (int)actionToExecute);
+        executeServoAction(actionToExecute);
+        
+        // Rearm kickstart because the motors have been stopped for a while
+        rearmKickstart();
+    }
+
 #ifdef TEST_MODE
     static uint32_t lastLedBlinkTime = 0;
     static bool ledState = false;
@@ -765,6 +921,16 @@ void loop() {
         lastLedBlinkTime = now;
         ledState = !ledState;
         ledcWrite(7, ledState ? 2048 : 0);
+    }
+#else
+    // Creative feedback blinking for DONE command
+    if (doneFeedbackBlinks > 0) {
+        if (now - lastFeedbackToggleTime >= 100) {
+            lastFeedbackToggleTime = now;
+            bool state = (doneFeedbackBlinks % 2 != 0);
+            digitalWrite(LED, state ? HIGH : LOW);
+            doneFeedbackBlinks--;
+        }
     }
 #endif
 }

@@ -14,6 +14,112 @@
 
 #define MQ_MAX_SEGMENTS 16
 
+// ============================================================================
+// S-Curve Trajectory Profile — jerk-limited velocity shaping
+// ============================================================================
+// Each non-duration segment gets a profiler that ramps acceleration via
+// bounded jerk, producing smooth S-shaped velocity curves.
+struct SCurveProfile {
+    float maxAccel;      // mm/s² or deg/s² — peak acceleration (ramp-up)
+    float maxDecel;      // mm/s² or deg/s² — peak deceleration (ramp-down)
+    float maxJerk;       // mm/s³ or deg/s³ — rate of accel change (ramp-up)
+    float maxDecelJerk;  // mm/s³ or deg/s³ — rate of accel change (ramp-down)
+    float currentAccel;  // current instantaneous acceleration
+    float profiledSpeed; // output speed after S-curve shaping
+    float prevProfiledSpeed; // previous tick's profiled speed (for feedforward)
+
+    SCurveProfile()
+        : maxAccel(250.0f), maxDecel(500.0f), maxJerk(1200.0f), maxDecelJerk(3000.0f),
+          currentAccel(0), profiledSpeed(0), prevProfiledSpeed(0) {}
+
+    void reset(float ma, float mj) {
+        maxAccel = ma; maxJerk = mj;
+        // Decel is 2x accel, decel-jerk is 2.5x — allow aggressive braking
+        maxDecel = ma * 2.0f; maxDecelJerk = mj * 2.5f;
+        currentAccel = 0; profiledSpeed = 0; prevProfiledSpeed = 0;
+    }
+
+    /// Advance one tick: ramp profiledSpeed toward targetSpeed with jerk limit.
+    /// Uses asymmetric limits — deceleration is faster than acceleration.
+    float update(float targetSpeed, float dt_s) {
+        if (dt_s < 0.0001f) return profiledSpeed;
+        prevProfiledSpeed = profiledSpeed;
+        float speedError = targetSpeed - profiledSpeed;
+        bool decelerating = (targetSpeed < profiledSpeed);
+        // Pick asymmetric limits
+        float effAccel = decelerating ? maxDecel : maxAccel;
+        float effJerk  = decelerating ? maxDecelJerk : maxJerk;
+        // Desired acceleration to close the gap
+        float desiredAccel = speedError / dt_s;
+        if (desiredAccel >  effAccel) desiredAccel =  effAccel;
+        if (desiredAccel < -effAccel) desiredAccel = -effAccel;
+        // Jerk-limit: change currentAccel toward desiredAccel
+        float accelError = desiredAccel - currentAccel;
+        float maxJerkStep = effJerk * dt_s;
+        if (accelError >  maxJerkStep) accelError =  maxJerkStep;
+        if (accelError < -maxJerkStep) accelError = -maxJerkStep;
+        currentAccel += accelError;
+        profiledSpeed += currentAccel * dt_s;
+        // Don't overshoot target
+        if ((speedError > 0 && profiledSpeed > targetSpeed) ||
+            (speedError < 0 && profiledSpeed < targetSpeed)) {
+            profiledSpeed = targetSpeed;
+            currentAccel = 0; // snap accel to zero when we hit target speed
+        }
+        if (profiledSpeed < 0) profiledSpeed = 0;
+        return profiledSpeed;
+    }
+};
+
+// ============================================================================
+// 1D Kalman Filter for position+velocity estimation (per axis)
+// ============================================================================
+struct KalmanAxis {
+    float x;    // estimated position
+    float v;    // estimated velocity
+    float p00, p01, p10, p11;  // 2x2 covariance matrix
+    float qPos, qVel, rMeas;   // noise parameters
+
+    KalmanAxis() : x(0), v(0), p00(1), p01(0), p10(0), p11(1),
+                   qPos(0.5f), qVel(50.0f), rMeas(2.0f) {}
+
+    void reset(float pos, float vel, float qp, float qv, float r) {
+        x = pos; v = vel;
+        p00 = 1; p01 = 0; p10 = 0; p11 = 1;
+        qPos = qp; qVel = qv; rMeas = r;
+    }
+
+    void predict(float dt) {
+        // State prediction: x += v*dt
+        x += v * dt;
+        // Covariance prediction
+        float np00 = p00 + dt * (p10 + p01) + dt * dt * p11 + qPos;
+        float np01 = p01 + dt * p11;
+        float np10 = p10 + dt * p11;
+        float np11 = p11 + qVel;
+        p00 = np00; p01 = np01; p10 = np10; p11 = np11;
+    }
+
+    void correct(float measuredPos) {
+        // Innovation
+        float y = measuredPos - x;
+        float s = p00 + rMeas;
+        if (s < 1e-6f) s = 1e-6f;
+        // Kalman gains
+        float k0 = p00 / s;
+        float k1 = p10 / s;
+        // State update
+        x += k0 * y;
+        v += k1 * y;
+        // Covariance update
+        float np00 = (1.0f - k0) * p00;
+        float np01 = (1.0f - k0) * p01;
+        float np10 = p10 - k1 * p00;
+        float np11 = p11 - k1 * p01;
+        p00 = np00; p01 = np01; p10 = np10; p11 = np11;
+    }
+};
+
 enum class SegmentState : uint8_t {
     PENDING,
     ACTIVE,
@@ -26,6 +132,7 @@ struct MotionSegment {
     uint16_t         distance_mm;
     SpeedLevel       speed;
     CorrectionPolicy correctionPolicy;
+    ServoAction      servoAction;
 
     // Computed at enqueue time
     float target_x;      // absolute target position (mm)
@@ -54,6 +161,7 @@ struct MotionSegment {
 
     MotionSegment() : direction(MoveDirection::INVALID), distance_mm(0),
                       speed(SpeedLevel::NORMAL), correctionPolicy(CorrectionPolicy::LIVE),
+                      servoAction(ServoAction::NONE),
                       target_x(0), target_y(0), target_angle(0), start_x(0), start_y(0), start_angle(0),
                       vx_mm_s(0), vy_mm_s(0), omega_deg_s(0), speed_mm_s(0), speed_deg_s(0),
                       isDurationBased(false), duration_ms(0), elapsed_ms(0),
@@ -82,18 +190,50 @@ public:
                                 float waypoint_tol_mm, float rot_tol_deg,
                                 float rot_stab_gain, float max_stab_omega);
 
+    /// Set predictive steering parameters
+    void setPredictiveParameters(float lookahead_time_s);
+
+    /// Set S-curve trajectory profile parameters
+    void setSCurveParameters(float max_accel_mm_s2, float max_jerk_mm_s3,
+                             float max_rot_accel_deg_s2, float max_rot_jerk_deg_s3);
+
+    /// Set feedforward compensation gains
+    void setFeedforwardGains(float kv, float ka, float kv_rot, float ka_rot);
+
+    /// Set adaptive lookahead parameters
+    void setAdaptiveLookahead(float base_s, float gain, float min_s, float max_s);
+
+    /// Set Kalman filter noise parameters
+    void setKalmanParameters(float q_pos, float q_vel, float r_meas);
+
+    /// Get the feedforward compensation values (for motor layer)
+    void getFeedforward(float &ff_vx, float &ff_vy, float &ff_omega) const;
+
+    /// Set predictive braking parameters (physics-based overshoot prevention)
+    void setPredictiveBraking(float decel_mm_s2, float safety_factor);
+
+    /// Set anti-slip / stall detection parameters
+    void setSlipDetection(float cmd_thresh, float obs_thresh, int detect_ticks,
+                          float boost_factor, int boost_max_ticks);
+
+    /// Returns true if slip/stall was detected on the current tick
+    bool isSlipDetected() const;
+
+    /// Get the EMA-smoothed observed velocity (mm/s)
+    void getEstimatedVelocity(float &vx, float &vy) const;
+
     /// Enqueue a new motion segment.
     /// @param currentX, currentY, currentAngle current estimated position
     /// @returns true if enqueued, false if queue is full
     bool enqueue(MoveDirection direction, uint16_t distance_mm,
-                 SpeedLevel speed, CorrectionPolicy policy,
+                 SpeedLevel speed, CorrectionPolicy policy, ServoAction action,
                  float currentX, float currentY, float currentAngle);
 
     /// Enqueue a new waypoint motion segment (absolute coordinate).
     /// @param currentX, currentY, currentAngle current estimated position
     /// @returns true if enqueued, false if queue is full
     bool enqueueWaypoint(float target_x, float target_y, float targetAngle,
-                         SpeedLevel speed, CorrectionPolicy policy,
+                         SpeedLevel speed, CorrectionPolicy policy, ServoAction action,
                          float currentX, float currentY, float currentAngle);
 
     /// Enqueue a duration-based move segment (move for a fixed time).
@@ -139,6 +279,9 @@ public:
 
     /// Get deferred correction (when segment finishes)
     void getDeferredCorrection(float &errX, float &errY, float &errAngle) const;
+
+    /// Get the servo action of the segment that just completed
+    ServoAction getLastCompletedServoAction() const;
 
     /// Number of segments remaining (including active)
     int  remaining() const;
@@ -194,9 +337,56 @@ private:
     float _rotStabilizationGain;
     float _maxStabilizationOmega;
 
+    // Velocity tracking for predictive steering
+    float _prevPoseX, _prevPoseY;
+    bool  _hasPreviousPose;
+    float _estVx, _estVy;           // Kalman-estimated velocity (mm/s)
+    float _lookaheadTimeS;           // base lookahead (seconds)
+    uint32_t _tickTimeMs;            // monotonic tick timer
+
+    // S-curve trajectory profiler (one for translation, one for rotation)
+    SCurveProfile _scurveTrans;
+    SCurveProfile _scurveRot;
+    float _scurveMaxAccelMmS2;
+    float _scurveMaxJerkMmS3;
+    float _scurveMaxRotAccelDegS2;
+    float _scurveMaxRotJerkDegS3;
+
+    // Feedforward gains
+    float _ffKv, _ffKa;             // linear velocity/accel feedforward
+    float _ffKvRot, _ffKaRot;       // rotational velocity/accel feedforward
+    float _ffVx, _ffVy, _ffOmega;   // computed feedforward outputs
+
+    // Adaptive lookahead parameters
+    float _adaptLookaheadBaseS;
+    float _adaptLookaheadGain;
+    float _adaptLookaheadMinS;
+    float _adaptLookaheadMaxS;
+
+    // Kalman filter (replaces EMA) — one per axis
+    KalmanAxis _kalmanX;
+    KalmanAxis _kalmanY;
+    bool _kalmanInitialized;
+
+    // Predictive braking — physics-based overshoot prevention
+    float _predictiveBrakeDecel;    // assumed deceleration capability (mm/s²)
+    float _predictiveBrakeSafety;   // safety margin factor (>1 = more conservative)
+
+    // Anti-slip / stall detection
+    float _slipCmdThresh;       // min commanded speed to monitor
+    float _slipObsThresh;       // observed speed below this = stalled
+    int   _slipDetectTicks;     // consecutive ticks needed to confirm
+    float _slipBoostFactor;     // multiplicative boost on stall
+    int   _slipBoostMaxTicks;   // max boost duration
+    int   _slipCounter;         // running count of suspect ticks
+    int   _slipBoostRemaining;  // remaining boost ticks
+    bool  _slipDetected;        // flag for telemetry
+
     float _getSpeedMmS(SpeedLevel level) const;
     float _getSpeedDegS(SpeedLevel level) const;
     void  _advanceToNext();
+    void  _updateVelocityEstimate(float x, float y, float dt_s);
+    float _computeAdaptiveLookahead(float currentSpeed) const;
 };
 
 #endif // MOTION_QUEUE_HPP

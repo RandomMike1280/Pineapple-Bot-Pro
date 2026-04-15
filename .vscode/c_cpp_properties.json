@@ -10,9 +10,10 @@
             "includePath": [
                 "C:/Users/csasd/Desktop/Pineapple-Bot-Pro/include",
                 "C:/Users/csasd/Desktop/Pineapple-Bot-Pro/src",
-                "C:/Users/csasd/Desktop/Pineapple-Bot-Pro/lib/ESP32_Servo_Controller",
                 "C:/Users/csasd/Desktop/Pineapple-Bot-Pro/lib/ESP32_Motor_Controller",
                 "C:/Users/csasd/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src",
+                "C:/Users/csasd/Desktop/Pineapple-Bot-Pro/lib/ServoControl",
+                "C:/Users/csasd/Desktop/Pineapple-Bot-Pro/lib/ESP32_Servo_Controller",
                 "C:/Users/csasd/Desktop/Pineapple-Bot-Pro/lib/LatencyCompensator",
                 "C:/Users/csasd/Desktop/Pineapple-Bot-Pro/lib/MotionQueue",
                 "C:/Users/csasd/Desktop/Pineapple-Bot-Pro/lib/UdpProtocol",
@@ -257,9 +258,10 @@
                 "path": [
                     "C:/Users/csasd/Desktop/Pineapple-Bot-Pro/include",
                     "C:/Users/csasd/Desktop/Pineapple-Bot-Pro/src",
-                    "C:/Users/csasd/Desktop/Pineapple-Bot-Pro/lib/ESP32_Servo_Controller",
                     "C:/Users/csasd/Desktop/Pineapple-Bot-Pro/lib/ESP32_Motor_Controller",
                     "C:/Users/csasd/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src",
+                    "C:/Users/csasd/Desktop/Pineapple-Bot-Pro/lib/ServoControl",
+                    "C:/Users/csasd/Desktop/Pineapple-Bot-Pro/lib/ESP32_Servo_Controller",
                     "C:/Users/csasd/Desktop/Pineapple-Bot-Pro/lib/LatencyCompensator",
                     "C:/Users/csasd/Desktop/Pineapple-Bot-Pro/lib/MotionQueue",
                     "C:/Users/csasd/Desktop/Pineapple-Bot-Pro/lib/UdpProtocol",

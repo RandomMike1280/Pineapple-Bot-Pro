@@ -12,7 +12,7 @@
 //   HELLO     H:<robot_id>
 //   MOVE      M:<dir>:<dist_mm>:<speed>:<policy>
 //   MOVE_DUR  D:<dir>:<duration_ms>:<speed>:<policy>
-//   WAYPOINT  W:<target_x>:<target_y>:<speed>:<policy>
+//   WAYPOINT  W:<target_x>:<target_y>[:<angle>]:<speed>:<policy>[:<servo_action>]
 //   ROTATE    T:<target_angle_deg>:<speed>:<policy>
 //   ROT_DUR   O:<cw|ccw>:<duration_ms>:<speed>:<policy>
 //   CAM       C:<timestamp_ms>:<x_mm>:<y_mm>[:<angle_deg>]
@@ -38,6 +38,7 @@ enum class MsgType : uint8_t {
     MOVE_DURATION,
     ROTATE_DURATION,
     VELOCITY,
+    DONE,
     UNKNOWN
 };
 
@@ -66,6 +67,15 @@ enum class CorrectionPolicy : uint8_t {
     LIVE = 0,
     DEFERRED,
     NONE,
+    INVALID
+};
+
+enum class ServoAction : uint8_t {
+    NONE = 0,
+    LOWER_LEFT,
+    LOWER_RIGHT,
+    UPPER_LEFT,
+    UPPER_RIGHT,
     INVALID
 };
 
@@ -108,6 +118,9 @@ struct UdpMessage {
 
     // REGISTER fields
     char robot_id[8];
+
+    // SERVO fields
+    ServoAction   servoAction;
 };
 
 // --- Parsing ---
@@ -124,9 +137,11 @@ int buildHelloMessage(char* buf, int maxLen, const char* robotId);
 /// Build a PONG message: "Q:<orig_timestamp>"
 int buildPongMessage(char* buf, int maxLen, uint32_t origTimestamp);
 
-/// Build a STATUS message: "S:<x>:<y>:<angle>:<queue_len>:<drift>"
+/// Build a STATUS message: "S:<y>:<x>:<angle>:<queue_len>:<drift>:<vy>:<vx>"
+/// Note: x/y and vx/vy are swapped to match phone's rotated coordinate system
 int buildStatusMessage(char* buf, int maxLen,
-                       float x, float y, float angle, int queueLen, float driftMm);
+                       float x, float y, float angle, int queueLen, float driftMm,
+                       float vx, float vy);
 
 /// Build a REGISTER message: "R:<robot_id>:<caps>"
 int buildRegisterMessage(char* buf, int maxLen,
@@ -137,6 +152,7 @@ MoveDirection   parseDirection(const char* str);
 RotationDirection parseRotationDirection(const char* str);
 SpeedLevel      parseSpeed(const char* str);
 CorrectionPolicy parsePolicy(const char* str);
+ServoAction      parseServoAction(const char* str);
 
 /// Convert direction enum to velocity unit vector (vx, vy)
 void directionToVector(MoveDirection dir, float &vx, float &vy);

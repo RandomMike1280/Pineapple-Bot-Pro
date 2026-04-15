@@ -20,10 +20,10 @@ coords = [
 ]
 
 # h = 763
-sx = 785
-sy = 770
-ox = 10
-oy = 40
+sx = 780
+sy = 731
+ox = -10
+oy = -10
 
 for x, y in coords:
     print(f'Offset({round(x/sx*1181 + ox)}f, {round(y/sy*1143 + oy)}f),')
