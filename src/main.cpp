@@ -749,12 +749,11 @@ void loop() {
     deadReckoning.getCurrentPosition(current_x, current_y, current_angle);
     bool moving = motionQueue.tick(dt, current_x, current_y, current_angle);
 
+    ServoAction actionToExecute = ServoAction::NONE;
     if (motionQueue.segmentJustCompleted) {
-        ServoAction action = motionQueue.getLastCompletedServoAction();
-        if (action != ServoAction::NONE) {
-            Serial.printf("[SERVO] Executing action: %d\n", (int)action);
-            executeServoAction(action);
-        }
+        actionToExecute = motionQueue.getLastCompletedServoAction();
+        // Clear flag now that we've captured the action
+        motionQueue.segmentJustCompleted = false;
 
         if (motionQueue.getActivePolicy() == CorrectionPolicy::DEFERRED) {
             float dcX, dcY, dcA;
@@ -777,6 +776,17 @@ void loop() {
     deadReckoning.update(currentVx, currentVy, currentOmega, dt);
 
     xSemaphoreGive(stateMutex);
+
+    // ---- Execution (OUTSIDE mutex) ----
+    // This allows Core 0 to handle heartbeats and new waypoint commands 
+    // while the robot is busy with its servo sequence.
+    if (actionToExecute != ServoAction::NONE) {
+        Serial.printf("[SERVO] Executing Action: %d\n", (int)actionToExecute);
+        executeServoAction(actionToExecute);
+        
+        // Rearm kickstart because the motors have been stopped for a while
+        rearmKickstart();
+    }
 
 #ifdef TEST_MODE
     static uint32_t lastLedBlinkTime = 0;
