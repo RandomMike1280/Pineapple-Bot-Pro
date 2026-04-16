@@ -73,6 +73,20 @@ ServoAction parseServoAction(const char *str) {
     return ServoAction::UPPER_LEFT;
   if (strcmp(str, "upper_right") == 0 || strcmp(str, "UR") == 0)
     return ServoAction::UPPER_RIGHT;
+  if (strcmp(str, "grabber_left") == 0 || strcmp(str, "GL") == 0)
+    return ServoAction::GRABBER_LEFT;
+  if (strcmp(str, "grabber_right") == 0 || strcmp(str, "GR") == 0)
+    return ServoAction::GRABBER_RIGHT;
+  if (strcmp(str, "grabber_center") == 0 || strcmp(str, "GC") == 0)
+    return ServoAction::GRABBER_CENTER;
+  if (strcmp(str, "slider_up") == 0 || strcmp(str, "SU") == 0)
+    return ServoAction::SLIDER_UP;
+  if (strcmp(str, "slider_down") == 0 || strcmp(str, "SD") == 0)
+    return ServoAction::SLIDER_DOWN;
+  if (strcmp(str, "arm_down") == 0 || strcmp(str, "AD") == 0)
+    return ServoAction::ARM_DOWN;
+  if (strcmp(str, "arm_up") == 0 || strcmp(str, "AU") == 0)
+    return ServoAction::ARM_UP;
   return ServoAction::INVALID;
 }
 

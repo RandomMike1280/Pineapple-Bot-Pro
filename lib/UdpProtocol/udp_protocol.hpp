@@ -78,6 +78,13 @@ enum class ServoAction : uint8_t {
     LOWER_RIGHT,
     UPPER_LEFT,
     UPPER_RIGHT,
+    GRABBER_LEFT,
+    GRABBER_RIGHT,
+    GRABBER_CENTER,
+    SLIDER_UP,
+    SLIDER_DOWN,
+    ARM_DOWN,
+    ARM_UP,
     INVALID
 };
 

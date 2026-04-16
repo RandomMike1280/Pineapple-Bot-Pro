@@ -2,39 +2,41 @@
 #include <esp32_servo.hpp>
 #include <Arduino.h>
 
-#define GRABBER_ANGLE    45
-#define SLIDER_UP        40
-#define SLIDER_DOWN      87
-#define ARM_UP           0
-#define ARM_DOWN         70
+#define VAL_GRABBER_LEFT    (45 * 2)
+#define VAL_GRABBER_RIGHT   0
+#define VAL_GRABBER_CENTER  45
+#define VAL_SLIDER_UP        40
+#define VAL_SLIDER_DOWN      87
+#define VAL_ARM_UP           0
+#define VAL_ARM_DOWN         70
 
 // Private helper functions to interact with the global servo objects from esp32_servo.hpp
 void _servo_action_grabber_left() {
-    servo1.write(GRABBER_ANGLE * 2);
+    servo1.write(VAL_GRABBER_LEFT);
 }
 
 void _servo_action_grabber_right() {
-    servo1.write(0);
+    servo1.write(VAL_GRABBER_RIGHT);
 }
 
 void _servo_action_grabber_center() {
-    servo1.write(GRABBER_ANGLE);
+    servo1.write(VAL_GRABBER_CENTER);
 }
 
 void _servo_action_slider_up() {
-    servo2.write(SLIDER_UP);
+    servo2.write(VAL_SLIDER_UP);
 }
 
 void _servo_action_slider_down() {
-    servo2.write(SLIDER_DOWN);
+    servo2.write(VAL_SLIDER_DOWN);
 }
 
 void _servo_action_arm_down() {
-    servo3.write(ARM_DOWN);
+    servo3.write(VAL_ARM_DOWN);
 }
 
 void _servo_action_arm_up() {
-    servo3.write(ARM_UP);
+    servo3.write(VAL_ARM_UP);
 }
 
 void initServoControl() {
@@ -93,6 +95,28 @@ void executeServoAction(ServoAction action) {
             _servo_action_arm_up();
             _servo_action_slider_down();
             delay(400); // Return
+            break;
+
+        case ServoAction::GRABBER_LEFT:
+            _servo_action_grabber_left();
+            break;
+        case ServoAction::GRABBER_RIGHT:
+            _servo_action_grabber_right();
+            break;
+        case ServoAction::GRABBER_CENTER:
+            _servo_action_grabber_center();
+            break;
+        case ServoAction::SLIDER_UP:
+            _servo_action_slider_up();
+            break;
+        case ServoAction::SLIDER_DOWN:
+            _servo_action_slider_down();
+            break;
+        case ServoAction::ARM_DOWN:
+            _servo_action_arm_down();
+            break;
+        case ServoAction::ARM_UP:
+            _servo_action_arm_up();
             break;
 
         case ServoAction::NONE:
