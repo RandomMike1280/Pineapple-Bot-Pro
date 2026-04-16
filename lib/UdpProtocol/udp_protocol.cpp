@@ -271,6 +271,12 @@ bool parseUdpMessage(const char *buffer, int len, UdpMessage &out) {
     out.type = MsgType::ABORT;
     return true;
 
+  case 'E': // SERVO EXEC — E:<action>
+    if (numTokens < 2) return false;
+    out.type = MsgType::SERVO_EXEC;
+    out.servoAction = parseServoAction(tokens[1]);
+    return (out.servoAction != ServoAction::INVALID);
+
   case 'R': // REGISTER — R:<robot_id>:<caps>
     if (numTokens < 2)
       return false;

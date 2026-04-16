@@ -633,6 +633,14 @@ void handleParsedMessage(const UdpMessage &msg) {
             break;
         }
 
+        case MsgType::SERVO_EXEC: {
+            logger.log("[CMD] SERVO_EXEC: %d", (int)msg.servoAction);
+            executeServoAction(msg.servoAction);
+            // Rearm kickstart in case motors were off
+            rearmKickstart();
+            break;
+        }
+
         default:
             logger.log("[UDP] Unhandled message type: %d", (int)msg.type);
             break;

@@ -41,6 +41,7 @@ enum class MsgType : uint8_t {
     SET_SERIAL_MONITOR,
     SERIAL_LOG,
     DONE,
+    SERVO_EXEC,
     UNKNOWN
 };
 
