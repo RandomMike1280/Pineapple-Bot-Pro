@@ -29,13 +29,18 @@ struct SCurveProfile {
     float prevProfiledSpeed; // previous tick's profiled speed (for feedforward)
 
     SCurveProfile()
-        : maxAccel(250.0f), maxDecel(500.0f), maxJerk(1200.0f), maxDecelJerk(3000.0f),
+        : maxAccel(250.0f), maxDecel(600.0f), maxJerk(1200.0f), maxDecelJerk(2400.0f),
           currentAccel(0), profiledSpeed(0), prevProfiledSpeed(0) {}
 
     void reset(float ma, float mj) {
         maxAccel = ma; maxJerk = mj;
-        // Decel is 2x accel, decel-jerk is 2.5x — allow aggressive braking
-        maxDecel = ma * 2.0f; maxDecelJerk = mj * 2.5f;
+        // Deceleration is 2x acceleration for aggressive braking
+        maxDecel = ma * 2.0f; maxDecelJerk = mj * 2.0f;
+        currentAccel = 0; profiledSpeed = 0; prevProfiledSpeed = 0;
+    }
+
+    void resetFull(float ma, float md, float mj, float mdj) {
+        maxAccel = ma; maxDecel = md; maxJerk = mj; maxDecelJerk = mdj;
         currentAccel = 0; profiledSpeed = 0; prevProfiledSpeed = 0;
     }
 
@@ -219,6 +224,14 @@ public:
     /// Returns true if slip/stall was detected on the current tick
     bool isSlipDetected() const;
 
+    /// Set stuck recovery parameters (backward + rotate to align, then retry)
+    void setStuckRecovery(float stuckDistMm, float backupDistMm,
+                          float minProgressMm, int stuckTicksThresh,
+                          int maxRecoveryAttempts);
+
+    /// Returns true if currently executing a stuck-recovery maneuver
+    bool isInStuckRecovery() const;
+
     /// Get the EMA-smoothed observed velocity (mm/s)
     void getEstimatedVelocity(float &vx, float &vy) const;
 
@@ -381,6 +394,22 @@ private:
     int   _slipCounter;         // running count of suspect ticks
     int   _slipBoostRemaining;  // remaining boost ticks
     bool  _slipDetected;        // flag for telemetry
+
+    // Stuck recovery — backward + rotate + retry when near target but can't reach it
+    float _stuckDistMm;              // consider "stuck" when within this distance of target
+    float _stuckBackupDistMm;        // how far to back up
+    float _stuckMinProgressMm;       // must move at least this much per tick to not be stuck
+    int   _stuckTicksThresh;         // consecutive ticks with insufficient progress = stuck
+    int   _stuckMaxAttempts;         // give up after this many recovery attempts
+    int   _stuckCounter;             // consecutive ticks with insufficient progress
+    int   _stuckRecoveryAttempts;     // how many times we've already tried recovering
+    bool  _stuckRecoveryActive;       // currently in recovery maneuver
+    int   _stuckRecoveryPhase;        // 0=idle, 1=backing up, 2=rotating to align, 3=waiting, 4=done
+    int   _stuckRecoveryTimer;        // countdown for timed phases
+    float _stuckRetryTargetX;         // where we were trying to go
+    float _stuckRetryTargetY;
+    float _stuckRetryTargetAngle;
+    SpeedLevel _stuckRetrySpeed;      // speed to use when retrying
 
     float _getSpeedMmS(SpeedLevel level) const;
     float _getSpeedDegS(SpeedLevel level) const;

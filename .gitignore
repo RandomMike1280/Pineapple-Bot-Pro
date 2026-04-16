@@ -6,3 +6,5 @@
 .pio/
 .vscode/
 .DS_Storegit
+.cursor
+.idea
