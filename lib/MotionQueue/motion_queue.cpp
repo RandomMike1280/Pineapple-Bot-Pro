@@ -870,17 +870,36 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             float dy = seg.target_y - current_y;
             float dist_remaining = sqrtf(dx * dx + dy * dy);
             
-            // Simultaneous completion check: position + orientation + velocity gate.
-            // The velocity gate prevents declaring "done" while the robot is still
-            // moving fast through the tolerance zone (momentum overshoot).
+            // --- PREDICTIVE COMPLETION CHECK ---
+            // Instead of just checking position tolerance, also predict whether
+            // the robot can stop within the tolerance given its current velocity.
             float heading_err = seg.target_angle - current_angle;
             while (heading_err > 180.0f) heading_err -= 360.0f;
             while (heading_err < -180.0f) heading_err += 360.0f;
 
             float obsSpd = sqrtf(_estVx * _estVx + _estVy * _estVy);
-            if (dist_remaining <= _waypointToleranceMm &&
-                fabsf(heading_err) <= _rotToleranceDeg &&
-                obsSpd < _precisionMinSpeedLimitMmS * 1.5f) {
+            
+            // Compute stopping distance: d = v^2/(2*a)
+            float stoppingDist = 0.0f;
+            if (obsSpd > 0.001f && _predictiveBrakeDecel > 0.001f) {
+                stoppingDist = (obsSpd * obsSpd) / (2.0f * _predictiveBrakeDecel);
+                // Apply safety margin to ensure we stop WITHIN tolerance
+                stoppingDist *= _predictiveBrakeSafety;
+            }
+            
+            // Calculate margin to tolerance boundary
+            float marginToTolerance = dist_remaining - _waypointToleranceMm;
+            
+            // Three-way completion gate:
+            // 1. Position within tolerance
+            // 2. Heading within tolerance  
+            // 3. Either nearly stopped OR stopping distance less than margin
+            bool atPositionTolerance = (dist_remaining <= _waypointToleranceMm);
+            bool atHeadingTolerance = (fabsf(heading_err) <= _rotToleranceDeg);
+            bool willStopInTolerance = (obsSpd < _precisionMinSpeedLimitMmS * 1.5f) ||
+                                       (stoppingDist <= marginToTolerance + _waypointToleranceMm);
+            
+            if (atPositionTolerance && atHeadingTolerance && willStopInTolerance) {
                 done = true;
             }
         }

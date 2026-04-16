@@ -129,7 +129,7 @@ int speed_to_motor_duty(double speed) {
     return 0;
 }
 
-MecanumSpeeds computeMecanumSpeeds(double V, double H, double A, bool lowSpeedMode) {
+MecanumSpeeds computeMecanumSpeeds(double V, double H, double A, bool lowSpeedMode, bool precisionMode) {
     MecanumSpeeds s;
     double mspeedf[4];
 
@@ -159,7 +159,18 @@ MecanumSpeeds computeMecanumSpeeds(double V, double H, double A, bool lowSpeedMo
         }
     }
 
-    if (lowSpeedMode) {
+    if (precisionMode) {
+        // Precision mode: use lower duty floor to enable very fine movements.
+        // Also disable kickstart entirely to avoid tiny oscillations at low speeds.
+        int fineClamp = DRIVE_CLAMP_FINE;
+        for (int i = 0; i < 4; i++) {
+            double absSpeed = abs(mspeedf[i]);
+            if (absSpeed > 0 && absSpeed < fineClamp) {
+                mspeedf[i] = sign(mspeedf[i]) * fineClamp;
+            }
+        }
+        // No kickstart in precision mode
+    } else if (lowSpeedMode) {
         // Near the target: skip kickstart and use a much lower duty floor.
         // This allows the robot to actually crawl at tiny velocities without
         // the kickstart/clamp re-inflating them to full duty (which causes wiggle).
@@ -194,6 +205,72 @@ MecanumSpeeds computeMecanumSpeeds(double V, double H, double A, bool lowSpeedMo
     s.m2 = (int)mspeedf[1];  // Back Right
     s.m3 = (int)mspeedf[2];  // Back Left
     s.m4 = (int)mspeedf[3];  // Front Left
+    return s;
+}
+
+// ============================================================================
+// Single-Motor Precision Mode — ultra-fine micro-adjustments
+// ============================================================================
+// For distances < ~15mm, activate only ONE wheel at a time.
+// This produces the smallest possible robot displacement (~1-2mm per step).
+MecanumSpeeds computeSingleMotorSpeeds(double V, double H) {
+    MecanumSpeeds s = {0, 0, 0, 0};
+    
+    // Select the dominant wheel based on desired velocity direction
+    // Mecanum wheel vectors (body frame):
+    //   M1(FR):  vx=-1, vy=-1   (forward-right quadrant)
+    //   M2(BR):  vx=-1, vy=+1   (backward-right quadrant)
+    //   M3(BL):  vx=+1, vy=+1   (backward-left quadrant)
+    //   M4(FL):  vx=+1, vy=-1   (forward-left quadrant)
+    
+    float desiredSpeed = sqrtf(V * V + H * H);
+    if (desiredSpeed < 0.001f) return s;  // no movement requested
+    
+    // Normalize direction vector
+    float dirX = V / desiredSpeed;
+    float dirY = H / desiredSpeed;
+    
+    // Dot product with each wheel's velocity vector to find dominant wheel
+    // Wheel vectors (normalized):
+    float w1 = -dirX - dirY;  // M1
+    float w2 = -dirX + dirY;  // M2
+    float w3 =  dirX + dirY;  // M3
+    float w4 =  dirX - dirY;  // M4
+    
+    // Select wheel with largest positive dot (most aligned with desired direction)
+    float maxDot = w1;
+    int selectedWheel = 0;
+    if (w2 > maxDot) { maxDot = w2; selectedWheel = 1; }
+    if (w3 > maxDot) { maxDot = w3; selectedWheel = 2; }
+    if (w4 > maxDot) { maxDot = w4; selectedWheel = 3; }
+    
+    // If no wheel has positive alignment (unusual), select strongest wheel anyway
+    if (maxDot <= 0) {
+        float absVals[4] = {fabsf(w1), fabsf(w2), fabsf(w3), fabsf(w4)};
+        selectedWheel = 0;
+        for (int i = 1; i < 4; i++) {
+            if (absVals[i] > absVals[selectedWheel]) selectedWheel = i;
+        }
+    }
+    
+// Single-motor mode: bypass speed mapping, use fixed duty cycle.
+// Since speed_to_motor_duty() has a dead zone (~65), use duty >= DRIVE_CLAMP_LOW
+// to guarantee motor starts, while still keeping speed low.
+int duty = DRIVE_CLAMP_LOW + 5;  // 70 — conservative start value (~5-8mm/s)
+
+// For very short distances (<8mm), use the minimum duty that still starts
+if (desiredSpeed < 8.0f) {
+    duty = DRIVE_CLAMP_LOW;  // 65 — minimal reliable start
+}
+    
+    // Assign to selected wheel only
+    switch (selectedWheel) {
+        case 0: s.m1 = (V >= 0) ? duty : -duty; break;  // FR
+        case 1: s.m2 = (V >= 0) ? duty : -duty; break;  // BR
+        case 2: s.m3 = (V >= 0) ? duty : -duty; break;  // BL
+        case 3: s.m4 = (V >= 0) ? duty : -duty; break;  // FL
+    }
+    
     return s;
 }
 
@@ -289,6 +366,12 @@ void applyMotors() {
     }
 
     if (!isMoving) {
+        // #region agent log - early return path analysis
+        logger.update("DEBUG", "!isMoving: motorWasMoving=%d rotOnly=%d rotBrake=%d transBrake=%d",
+            motorWasMoving, lastMotionWasRotationOnly,
+            rotationBrakeFrames > 0, translationBrakeFrames > 0);
+        // #endregion
+
         if (motionIdleStartTime == 0) motionIdleStartTime = millis();
         // Gap-hold: keep previous velocity briefly to bridge timing gaps between segments.
         // Skip this in HOLDING state — we've arrived and want instant stop, not coasting.
@@ -412,7 +495,41 @@ void applyMotors() {
     // to prevent kickstart and DRIVE_CLAMP_LOW from re-inflating tiny velocities
     float cmdMag = sqrtf(vx * vx + vy * vy);
     bool lowSpeedMode = (cmdMag > 0.001f && cmdMag < 10.0f);  // below ~10 mm/s
-    MecanumSpeeds s = computeMecanumSpeeds(V, H, A, lowSpeedMode);
+    
+    bool precisionMode = false;
+    bool singleMotorMode = false;
+    if (seg && seg->state == SegmentState::ACTIVE) {
+        float cx, cy, c_angle;
+        deadReckoning.getCurrentPosition(cx, cy, c_angle);
+        float dx = seg->target_x - cx;
+        float dy = seg->target_y - cy;
+        float distRemaining = sqrtf(dx * dx + dy * dy);
+
+        // #region agent log - single motor mode detection
+        logger.update("DEBUG", "DIST_CHECK: dist=%.2f cmdMag=%.3f", distRemaining, cmdMag);
+        // #endregion
+        
+        // Single-motor mode: very close to target, extremely slow
+        // Only 1 wheel moves → minimal movement (~1-2mm steps)
+        if (distRemaining < 15.0f && cmdMag > 0.001f && cmdMag < 10.0f) {
+            singleMotorMode = true;
+        } else if (distRemaining < PRECISION_MODE_THRESH_MM && 
+                   cmdMag > 0.001f && cmdMag < 15.0f) {
+            precisionMode = true;
+        }
+    }
+    
+    MecanumSpeeds s;
+    if (singleMotorMode) {
+        s = computeSingleMotorSpeeds(V, H);
+    } else {
+        s = computeMecanumSpeeds(V, H, A, lowSpeedMode, precisionMode);
+    }
+
+    // #region agent log - motor command output
+    logger.update("MOTOR_CMD", "singleMotor=%d M1=%d M2=%d M3=%d M4=%d",
+        singleMotorMode, s.m1, s.m2, s.m3, s.m4);
+    // #endregion
 
 #if ENABLE_DEBUG_LOGGING
     static unsigned long lastDebugTime = 0;
@@ -431,6 +548,9 @@ void applyMotors() {
         lastPrintTime = millis();
     }
 #else
+    // #region agent log - about to run motors
+    logger.update("DEBUG", "RUNNING: M1=%d M2=%d M3=%d M4=%d", s.m1, s.m2, s.m3, s.m4);
+    // #endregion
     Motor1.Run(s.m1);
     Motor2.Run(s.m2);
     Motor3.Run(s.m3);

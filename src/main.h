@@ -43,9 +43,15 @@
 // ============================================================================
 // Diagnostics & Safety
 // ============================================================================
-#define ENABLE_DEBUG_LOGGING     0        // Set to 1 to enable detailed serial logs
+#define ENABLE_DEBUG_LOGGING     1        // Set to 1 to enable detailed serial logs
 #define DRIVE_CLAMP_LOW          65       // Minimum duty to overcome static friction
 #define DRIVE_CLAMP_HIGH         100      // Maximum allowable duty (safety cap)
+
+// Precision Mode — for fine positioning when distance < PRECISION_MODE_THRESH_MM
+#define DRIVE_CLAMP_FINE         65       // Lower duty floor for precision mode (raised from 28 to overcome dead zone)
+#define DRIVE_CLAMP_MINIMAL      25       // Ultra-low floor for single-motor micro-adjustments
+#define PRECISION_MODE_THRESH_MM 50       // Enter precision mode when remaining distance < this
+#define PRECISION_KICKSTART_SUPPRESS true // Disable kickstart in precision mode to prevent wiggle
 
 // Motor mapping constants
 #define MOTOR_MAP_SLOPE          43.0174f
@@ -74,7 +80,7 @@
 #define ROT_DECCEL_DEG           15.0f    // Start slowing down rotation at this angle
 #define MIN_SPEED_LIMIT_MM_S     10.0f    // Floor speed during deccel (prevent stall)
 #define MIN_ROT_LIMIT_DEG_S      5.0f     // Floor rotation during deccel
-#define PRECISION_MIN_SPEED_LIMIT_MM_S 8.0f
+#define PRECISION_MIN_SPEED_LIMIT_MM_S 14.0f
 #define PRECISION_MIN_ROT_LIMIT_DEG_S  5.0f
 #define CLOSE_APPROACH_DISTANCE_MM     120.0f
 #define CLOSE_ROT_APPROACH_DEG         8.0f
@@ -149,7 +155,7 @@
 // ============================================================================
 // If commanded speed > threshold but observed speed < threshold for N ticks,
 // the robot is likely stalled or slipping.  Boost command to break free.
-#define SLIP_CMD_SPEED_THRESH_MM_S  15.0f  // min commanded speed to monitor slip
+#define SLIP_CMD_SPEED_THRESH_MM_S  20.0f  // min commanded speed to monitor slip (raised from 15)
 #define SLIP_OBS_SPEED_THRESH_MM_S   5.0f  // observed speed below this = stalled
 #define SLIP_DETECT_TICKS           25     // consecutive ticks to confirm stall (~75ms at 333Hz)
 #define SLIP_BOOST_FACTOR            1.35f // multiplicative boost when stall detected
@@ -217,6 +223,12 @@ struct MecanumSpeeds {
 /// Compute individual motor duties from normalized velocity components.
 /// V = forward/backward (-1..1), H = strafe (-1..1), A = rotation (-1..1)
 /// Applies speed_to_motor_duty, normalization, and kickstart.
-MecanumSpeeds computeMecanumSpeeds(double V, double H, double A, bool lowSpeedMode = false);
+/// @param precisionMode when true, uses lower duty floor for fine positioning
+MecanumSpeeds computeMecanumSpeeds(double V, double H, double A, bool lowSpeedMode = false, bool precisionMode = false);
+
+/// Compute single-motor duty for ultra-fine micro-adjustments.
+/// Only one motor is active at a time, producing ~1-2mm steps.
+/// Uses DRIVE_CLAMP_MINIMAL duty floor (18).
+MecanumSpeeds computeSingleMotorSpeeds(double V, double H);
 
 #endif // MAIN_H
