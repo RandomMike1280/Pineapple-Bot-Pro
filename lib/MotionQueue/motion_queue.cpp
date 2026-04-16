@@ -27,17 +27,10 @@ MotionQueue::MotionQueue()
       _adaptLookaheadBaseS(0.06f), _adaptLookaheadGain(0.0022f),
       _adaptLookaheadMinS(0.04f), _adaptLookaheadMaxS(0.25f),
       _kalmanInitialized(false),
-      _predictiveBrakeDecel(450.0f), _predictiveBrakeSafety(1.2f),
+      _predictiveBrakeDecel(200.0f), _predictiveBrakeSafety(1.5f),
       _slipCmdThresh(15.0f), _slipObsThresh(5.0f), _slipDetectTicks(25),
       _slipBoostFactor(1.35f), _slipBoostMaxTicks(40),
       _slipCounter(0), _slipBoostRemaining(0), _slipDetected(false),
-      _stuckDistMm(100.0f), _stuckBackupDistMm(50.0f),
-      _stuckMinProgressMm(0.5f), _stuckTicksThresh(30),
-      _stuckMaxAttempts(2),
-      _stuckCounter(0), _stuckRecoveryAttempts(0),
-      _stuckRecoveryActive(false), _stuckRecoveryPhase(0), _stuckRecoveryTimer(0),
-      _stuckRetryTargetX(0), _stuckRetryTargetY(0), _stuckRetryTargetAngle(0),
-      _stuckRetrySpeed(SpeedLevel::NORMAL),
       segmentJustCompleted(false)
 {
     _scurveTrans.reset(_scurveMaxAccelMmS2, _scurveMaxJerkMmS3);
@@ -131,20 +124,6 @@ void MotionQueue::setSlipDetection(float cmd_thresh, float obs_thresh, int detec
 
 bool MotionQueue::isSlipDetected() const {
     return _slipDetected;
-}
-
-void MotionQueue::setStuckRecovery(float stuckDistMm, float backupDistMm,
-                                  float minProgressMm, int stuckTicksThresh,
-                                  int maxRecoveryAttempts) {
-    _stuckDistMm = stuckDistMm;
-    _stuckBackupDistMm = backupDistMm;
-    _stuckMinProgressMm = minProgressMm;
-    _stuckTicksThresh = stuckTicksThresh;
-    _stuckMaxAttempts = maxRecoveryAttempts;
-}
-
-bool MotionQueue::isInStuckRecovery() const {
-    return _stuckRecoveryActive;
 }
 
 float MotionQueue::_computeAdaptiveLookahead(float currentSpeed) const {
@@ -872,158 +851,6 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             if (_slipBoostRemaining == 0) {
                 _slipDetected = false;
                 _slipCounter = 0;
-            }
-        }
-    }
-
-    // =========================================================================
-    // --- STUCK RECOVERY: backward + rotate to align + retry ---
-    // When the robot is very close to the target but can't physically reach it
-    // (likely bumped into something), back up, re-align to the target, and retry.
-    // =========================================================================
-    if (_count > 0) {
-        MotionSegment &seg = _segments[_head % MQ_MAX_SEGMENTS];
-
-        // Phase 0: idle — monitor for stuck condition during normal translation
-        if (!_stuckRecoveryActive && _stuckRecoveryPhase == 0) {
-            // Only monitor during active translation (non-rotation)
-            bool isTranslation = !(seg.vx_mm_s == 0 && seg.vy_mm_s == 0 && seg.omega_deg_s != 0);
-            if (!seg.isDurationBased && isTranslation) {
-                float dx = seg.target_x - current_x;
-                float dy = seg.target_y - current_y;
-                float dist_remaining = sqrtf(dx * dx + dy * dy);
-
-                if (dist_remaining > _waypointToleranceMm * 2.0f &&
-                    dist_remaining < _stuckDistMm) {
-                    // Near the target but not there yet — check if we're making progress
-                    float dx2 = current_x - seg.start_x;
-                    float dy2 = current_y - seg.start_y;
-                    float moved = sqrtf(dx2 * dx2 + dy2 * dy2);
-
-                    if (moved < _stuckMinProgressMm) {
-                        _stuckCounter++;
-                    } else {
-                        _stuckCounter = 0;
-                    }
-
-                    if (_stuckCounter >= _stuckTicksThresh &&
-                        _stuckRecoveryAttempts < _stuckMaxAttempts) {
-                        // Trigger recovery: back up, rotate, then retry
-                        _stuckRecoveryActive = true;
-                        _stuckRecoveryPhase = 1;
-                        _stuckRecoveryAttempts++;
-                        _stuckRecoveryTimer = 0;
-                        // Save retry target
-                        _stuckRetryTargetX = seg.target_x;
-                        _stuckRetryTargetY = seg.target_y;
-                        _stuckRetryTargetAngle = seg.target_angle;
-                        _stuckRetrySpeed = seg.speed;
-                        _stuckCounter = 0;
-#if ENABLE_DEBUG_LOGGING
-                        Serial.printf("[MQ] STUCK! dist=%.1f attempts=%d/%d — backing up\n",
-                                      dist_remaining, _stuckRecoveryAttempts, _stuckMaxAttempts);
-#endif
-                    }
-                } else {
-                    _stuckCounter = 0;
-                }
-            }
-        }
-
-        // Handle recovery phases
-        if (_stuckRecoveryActive) {
-            float dx = _stuckRetryTargetX - current_x;
-            float dy = _stuckRetryTargetY - current_y;
-            float toTarget = sqrtf(dx * dx + dy * dy);
-
-            if (_stuckRecoveryPhase == 1) {
-                // Phase 1: back up — move backward from target (negative direction)
-                float backupSpeed = _getSpeedMmS(_stuckRetrySpeed) * 0.6f;
-                if (toTarget > 0.001f) {
-                    _currentVx = -(dx / toTarget) * backupSpeed;
-                    _currentVy = -(dy / toTarget) * backupSpeed;
-                }
-                _currentOmega = 0;
-                _stuckRecoveryTimer += dt_ms;
-
-                // Duration-based: back up for enough time to cover the distance
-                uint32_t backupMs = (uint32_t)((_stuckBackupDistMm / backupSpeed) * 1000.0f) + 50;
-                if (_stuckRecoveryTimer >= backupMs) {
-                    _stuckRecoveryPhase = 2;
-                    _stuckRecoveryTimer = 0;
-                    _currentVx = _currentVy = 0;
-                }
-            } else if (_stuckRecoveryPhase == 2) {
-                // Phase 2: rotate to face the target
-                _currentVx = _currentVy = 0;
-                _stuckRecoveryTimer += dt_ms;
-
-                float err = _stuckRetryTargetAngle - current_angle;
-                while (err > 180.0f)  err -= 360.0f;
-                while (err < -180.0f)  err += 360.0f;
-                float rotSpeed = _getSpeedDegS(_stuckRetrySpeed) * 0.7f;
-
-                if (fabsf(err) <= _rotToleranceDeg * 1.5f) {
-                    _currentOmega = 0;
-                    _stuckRecoveryPhase = 3;
-                    _stuckRecoveryTimer = 0;
-                } else {
-                    _currentOmega = (err > 0) ? rotSpeed : -rotSpeed;
-                }
-
-                // Safety: timeout after 2 seconds
-                if (_stuckRecoveryTimer > 2000) {
-                    _currentOmega = 0;
-                    _stuckRecoveryPhase = 3;
-                    _stuckRecoveryTimer = 0;
-                }
-            } else if (_stuckRecoveryPhase == 3) {
-                // Phase 3: pause briefly, then inject a new forward segment
-                _stuckRecoveryTimer += dt_ms;
-                _currentVx = _currentVy = _currentOmega = 0;
-
-                if (_stuckRecoveryTimer >= 150) {
-                    // Inject a fresh forward segment toward the original target
-                    // The queue has our original segment still at the head.
-                    // We inject a "retry" segment right after it by patching the
-                    // current segment's target to the original, then letting it run.
-                    // Since the original segment may have been partially completed,
-                    // we need to compute a new target from current position.
-                    seg.target_x = _stuckRetryTargetX;
-                    seg.target_y = _stuckRetryTargetY;
-                    seg.target_angle = _stuckRetryTargetAngle;
-                    // Recalculate direction vector
-                    float ndx = seg.target_x - current_x;
-                    float ndy = seg.target_y - current_y;
-                    float ndist = sqrtf(ndx * ndx + ndy * ndy);
-                    if (ndist > 0.001f) {
-                        float spd = _getSpeedMmS(_stuckRetrySpeed);
-                        seg.vx_mm_s = (ndx / ndist) * spd;
-                        seg.vy_mm_s = (ndy / ndist) * spd;
-                        seg.speed_mm_s = spd;
-                    }
-                    seg.speed = _stuckRetrySpeed;
-                    // Reset traveled so the completion check is based on new distance
-                    seg.traveled_mm = 0;
-                    seg.start_x = current_x;
-                    seg.start_y = current_y;
-                    seg.start_angle = current_angle;
-                    // Reset S-curve for clean restart
-                    _scurveTrans.reset(_scurveMaxAccelMmS2, _scurveMaxJerkMmS3);
-                    _scurveTrans.profiledSpeed = 0;
-                    _scurveTrans.prevProfiledSpeed = 0;
-                    _scurveTrans.currentAccel = 0;
-                    // Reset Kalman to avoid stale velocity estimate
-                    _hasPreviousPose = false;
-                    _kalmanInitialized = false;
-
-                    _stuckRecoveryActive = false;
-                    _stuckRecoveryPhase = 0;
-#if ENABLE_DEBUG_LOGGING
-                    Serial.printf("[MQ] Recovery done — retrying toward (%.1f, %.1f)\n",
-                                  _stuckRetryTargetX, _stuckRetryTargetY);
-#endif
-                }
             }
         }
     }

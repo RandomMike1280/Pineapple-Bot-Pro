@@ -160,13 +160,14 @@ MecanumSpeeds computeMecanumSpeeds(double V, double H, double A, bool lowSpeedMo
     }
 
     if (lowSpeedMode) {
-        // Near the target: skip kickstart and use a higher duty floor
-        // to ensure the motors have enough torque to actually move.
-        int nearTargetClamp = NEAR_TARGET_MOTOR_MIN;
+        // Near the target: skip kickstart and use a much lower duty floor.
+        // This allows the robot to actually crawl at tiny velocities without
+        // the kickstart/clamp re-inflating them to full duty (which causes wiggle).
+        int lowClamp = DRIVE_CLAMP_LOW;  // Same floor — motors won't turn below this. Anti-wiggle comes from no kickstart.
         for (int i = 0; i < 4; i++) {
             double absSpeed = abs(mspeedf[i]);
-            if (absSpeed > 0 && absSpeed < nearTargetClamp) {
-                mspeedf[i] = sign(mspeedf[i]) * nearTargetClamp;
+            if (absSpeed > 0 && absSpeed < lowClamp) {
+                mspeedf[i] = sign(mspeedf[i]) * lowClamp;
             }
         }
         // Don't rearm kickstart in low-speed mode
@@ -410,7 +411,7 @@ void applyMotors() {
     // Detect settling band: commanded speed is very low → use low-speed motor mode
     // to prevent kickstart and DRIVE_CLAMP_LOW from re-inflating tiny velocities
     float cmdMag = sqrtf(vx * vx + vy * vy);
-    bool lowSpeedMode = (cmdMag > 0.001f && cmdMag < 15.0f);  // below ~15 mm/s
+    bool lowSpeedMode = (cmdMag > 0.001f && cmdMag < 10.0f);  // below ~10 mm/s
     MecanumSpeeds s = computeMecanumSpeeds(V, H, A, lowSpeedMode);
 
 #if ENABLE_DEBUG_LOGGING
@@ -745,9 +746,6 @@ void setup() {
                                      KALMAN_MEASUREMENT_NOISE);
     motionQueue.setSlipDetection(SLIP_CMD_SPEED_THRESH_MM_S, SLIP_OBS_SPEED_THRESH_MM_S,
                                   SLIP_DETECT_TICKS, SLIP_BOOST_FACTOR, SLIP_BOOST_MAX_TICKS);
-    // Stuck recovery: back up + rotate to align + retry when close to target but stuck
-    // Parameters: within 80mm consider stuck, back up 45mm, need < 1mm/tick progress for 30 ticks
-    motionQueue.setStuckRecovery(80.0f, 45.0f, 1.0f, 30, 2);
     motionQueue.setPredictiveBraking(PREDICTIVE_BRAKE_DECEL_MM_S2, PREDICTIVE_BRAKE_SAFETY);
 
     latencyComp.init(&deadReckoning, &motionQueue);

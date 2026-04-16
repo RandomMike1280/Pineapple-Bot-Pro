@@ -44,9 +44,8 @@
 // Diagnostics & Safety
 // ============================================================================
 #define ENABLE_DEBUG_LOGGING     0        // Set to 1 to enable detailed serial logs
-#define DRIVE_CLAMP_LOW          80       // Minimum duty to overcome static friction
+#define DRIVE_CLAMP_LOW          65       // Minimum duty to overcome static friction
 #define DRIVE_CLAMP_HIGH         100      // Maximum allowable duty (safety cap)
-#define NEAR_TARGET_MOTOR_MIN    78       // Higher floor for motor duty when close to target
 
 // Motor mapping constants
 #define MOTOR_MAP_SLOPE          43.0174f
@@ -71,13 +70,13 @@
 // ============================================================================
 // Precision & Deceleration
 // ============================================================================
-#define DECCEL_DISTANCE_MM       400.0f   // Start slowing down earlier for more controlled stops
+#define DECCEL_DISTANCE_MM       500.0f   // Start slowing down at this distance (CNC-style long decel)
 #define ROT_DECCEL_DEG           15.0f    // Start slowing down rotation at this angle
-#define MIN_SPEED_LIMIT_MM_S     15.0f    // Floor speed during deccel (prevent stall)
-#define MIN_ROT_LIMIT_DEG_S      8.0f     // Floor rotation during deccel
-#define PRECISION_MIN_SPEED_LIMIT_MM_S 15.0f
-#define PRECISION_MIN_ROT_LIMIT_DEG_S  8.0f
-#define CLOSE_APPROACH_DISTANCE_MM     100.0f  // Narrow precision zone
+#define MIN_SPEED_LIMIT_MM_S     10.0f    // Floor speed during deccel (prevent stall)
+#define MIN_ROT_LIMIT_DEG_S      5.0f     // Floor rotation during deccel
+#define PRECISION_MIN_SPEED_LIMIT_MM_S 8.0f
+#define PRECISION_MIN_ROT_LIMIT_DEG_S  5.0f
+#define CLOSE_APPROACH_DISTANCE_MM     120.0f
 #define CLOSE_ROT_APPROACH_DEG         8.0f
 #define WAYPOINT_TOLERANCE_MM    5.0f     // Tighten tolerance for arrival
 #define ROTATION_TOLERANCE_DEG   1.5f
@@ -102,8 +101,8 @@
 // Predictive Braking — physics-based overshoot prevention
 // Uses observed closing speed and kinematic equation v² = 2*a*d to decide
 // if the robot can stop before the target.  If not, speed_scale is reduced.
-#define PREDICTIVE_BRAKE_DECEL_MM_S2   450.0f   // Higher decel = brake sooner/more aggressively
-#define PREDICTIVE_BRAKE_SAFETY        1.2f     // Lower safety margin = more aggressive
+#define PREDICTIVE_BRAKE_DECEL_MM_S2   200.0f   // assumed deceleration capability (mm/s²)
+#define PREDICTIVE_BRAKE_SAFETY        1.5f     // safety margin (>1 = start braking earlier)
 
 // ============================================================================
 // S-Curve Trajectory Profile (Jerk-Limited Motion)
@@ -115,8 +114,6 @@
 #define SCURVE_MAX_JERK_MM_S3    1200.0f  // max rate-of-change of acceleration (mm/s³)
 #define SCURVE_MAX_ROT_ACCEL_DEG_S2  180.0f  // max rotational acceleration (deg/s²)
 #define SCURVE_MAX_ROT_JERK_DEG_S3   900.0f  // max rotational jerk (deg/s³)
-#define SCURVE_MAX_DECEL_MM_S2   600.0f   // Higher deceleration for faster braking
-#define SCURVE_MAX_DECEL_JERK_MM_S3 2400.0f // Faster decel ramp
 
 // ============================================================================
 // Feedforward Compensation
