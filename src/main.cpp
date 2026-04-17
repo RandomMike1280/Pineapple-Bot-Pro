@@ -205,24 +205,21 @@ MecanumSpeeds computeMecanumSpeeds(double V, double H, double A, bool lowSpeedMo
         }
     }
 
-    // Motor balance: compensate for right-side motors consistently producing
-    // more torque than left-side motors. M2 (BR) and M3 (BL) are right-side,
-    // M1 (FR) and M4 (FL) are left-side. Apply a small right-side reduction
-    // (not left-side boost) so that when speed-to-duty maps the same command,
-    // right motors get slightly less PWM duty to equalize torque output.
-    // (Bug fix: previous code boosted right and reduced left, which was backwards.)
-    const float BALANCE_RIGHT_REDUCE = 1.5f;  // reduced from 3.0 — was overcorrecting (Ravg went to 0 while Lavg was 70)
+    // Motor balance: right-side motors (M2=BR, M3=BL) produce more torque than
+    // left-side motors (M1=FR, M4=FL). Equalize by reducing right-side PWM magnitude.
+    //
+    // Key insight: "weaken" means reducing the magnitude of the duty cycle.
+    // Forward  (mspeedf > 0): subtract BALANCE → smaller positive = weaker forward
+    // Backward (mspeedf < 0): subtract BALANCE → larger negative = weaker backward
+    //   Example backward: -66 - 1.5 = -67.5 (more negative = weaker backward)
+    //   Bug: previous code ADDED for negative, making -64.5 (less negative = stronger)
+    const float BALANCE_RIGHT_REDUCE = 1.5f;
     for (int i = 0; i < 4; i++) {
-        if (mspeedf[i] > 0) {
-            if (i == 1 || i == 2) {
-                mspeedf[i] -= BALANCE_RIGHT_REDUCE;
-                if (mspeedf[i] < DRIVE_CLAMP_LOW * 0.5f) mspeedf[i] = DRIVE_CLAMP_LOW * 0.5f;
-            }
-        } else if (mspeedf[i] < 0) {
-            if (i == 1 || i == 2) {
-                mspeedf[i] += BALANCE_RIGHT_REDUCE;
-                if (mspeedf[i] > -DRIVE_CLAMP_LOW * 0.5f) mspeedf[i] = -DRIVE_CLAMP_LOW * 0.5f;
-            }
+        if (i == 1 || i == 2) {
+            mspeedf[i] -= BALANCE_RIGHT_REDUCE;  // same operation for both signs
+            float clamp_limit = DRIVE_CLAMP_LOW * 0.5f;
+            if (mspeedf[i] > 0 && mspeedf[i] < clamp_limit) mspeedf[i] = clamp_limit;
+            if (mspeedf[i] < 0 && mspeedf[i] > -clamp_limit) mspeedf[i] = -clamp_limit;
         }
     }
 
