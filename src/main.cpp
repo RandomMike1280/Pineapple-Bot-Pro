@@ -309,11 +309,16 @@ if (desiredSpeed < 8.0f) {
 }
     
     // Assign to selected wheel only
+    // Use H >= 0 (not V >= 0) to determine forward/back direction:
+    // M1/M2 spin on the V axis (-vx-vy, -vx+vy), so they naturally flip
+    // when V reverses. M3/M4 spin on the H axis (+vx+vy, +vx-vy), so they
+    // flip when H reverses. The wheel selector uses H as the dominant axis
+    // for M3/M4, so the polarity test must match.
     switch (selectedWheel) {
-        case 0: s.m1 = (V >= 0) ? duty : -duty; break;  // FR
-        case 1: s.m2 = (V >= 0) ? duty : -duty; break;  // BR
-        case 2: s.m3 = (V >= 0) ? duty : -duty; break;  // BL
-        case 3: s.m4 = (V >= 0) ? duty : -duty; break;  // FL
+        case 0: s.m1 = (V >= 0) ? duty : -duty; break;  // FR — responds to V
+        case 1: s.m2 = (V >= 0) ? duty : -duty; break;  // BR — responds to V
+        case 2: s.m3 = (H >= 0) ? duty : -duty; break;  // BL — responds to H
+        case 3: s.m4 = (H >= 0) ? duty : -duty; break;  // FL — responds to H
     }
     
     return s;
