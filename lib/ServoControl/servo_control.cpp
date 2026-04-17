@@ -8,7 +8,7 @@
 #define VAL_SLIDER_UP        40
 #define VAL_SLIDER_DOWN      87
 #define VAL_ARM_UP           0
-#define VAL_ARM_DOWN         80
+#define VAL_ARM_DOWN         90
 
 // Private helper functions to interact with the global servo objects from esp32_servo.hpp
 void _servo_action_grabber_left() {
@@ -73,9 +73,9 @@ void executeServoAction(ServoAction action) {
 
         case ServoAction::UPPER_LEFT:
             _servo_action_slider_down();
-            delay(100);
+            delay(200);
             _servo_action_arm_down();
-            delay(200); // Wait for arm/slider
+            delay(100); // Wait for arm/slider
             _servo_action_slider_up();
             _servo_action_arm_up();
             delay(50);      
@@ -85,7 +85,7 @@ void executeServoAction(ServoAction action) {
             _servo_action_slider_up();
             delay(100);
             _servo_action_arm_down();
-            delay(50); // Wait for arm/slider
+            delay(100); // Wait for arm/slider
             _servo_action_arm_up();
             delay(50); // Return
             break;
