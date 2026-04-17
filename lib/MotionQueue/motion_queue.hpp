@@ -313,6 +313,9 @@ public:
     // Flag: set to true when a segment just completed (for deferred correction)
     bool segmentJustCompleted;
 
+    // DEBUG: Wiggle diagnostics — traces speed_scale components near target
+    void debugLogWiggle(float current_x, float current_y, float current_angle);
+
 private:
     // === Queue State ===
     MotionSegment _segments[MQ_MAX_SEGMENTS];

@@ -207,17 +207,20 @@ MecanumSpeeds computeMecanumSpeeds(double V, double H, double A, bool lowSpeedMo
 
     // Motor balance: compensate for right-side motors consistently producing
     // more torque than left-side motors. M2 (BR) and M3 (BL) are right-side,
-    // M1 (FR) and M4 (FL) are left-side. Apply a small left-side boost.
-    const float BALANCE_RIGHT_BOOST = 3.0f;  // extra duty for right side to equalize
+    // M1 (FR) and M4 (FL) are left-side. Apply a small right-side reduction
+    // (not left-side boost) so that when speed-to-duty maps the same command,
+    // right motors get slightly less PWM duty to equalize torque output.
+    // (Bug fix: previous code boosted right and reduced left, which was backwards.)
+    const float BALANCE_RIGHT_REDUCE = 3.0f;  // extra reduction for right side to equalize
     for (int i = 0; i < 4; i++) {
         if (mspeedf[i] > 0) {
             if (i == 1 || i == 2) {
-                mspeedf[i] -= BALANCE_RIGHT_BOOST;
+                mspeedf[i] -= BALANCE_RIGHT_REDUCE;
                 if (mspeedf[i] < DRIVE_CLAMP_LOW * 0.5f) mspeedf[i] = DRIVE_CLAMP_LOW * 0.5f;
             }
         } else if (mspeedf[i] < 0) {
             if (i == 1 || i == 2) {
-                mspeedf[i] += BALANCE_RIGHT_BOOST;
+                mspeedf[i] += BALANCE_RIGHT_REDUCE;
                 if (mspeedf[i] > -DRIVE_CLAMP_LOW * 0.5f) mspeedf[i] = -DRIVE_CLAMP_LOW * 0.5f;
             }
         }
@@ -227,6 +230,26 @@ MecanumSpeeds computeMecanumSpeeds(double V, double H, double A, bool lowSpeedMo
     s.m2 = (int)mspeedf[1];  // Back Right
     s.m3 = (int)mspeedf[2];  // Back Left
     s.m4 = (int)mspeedf[3];  // Front Left
+
+    // DEBUG: Motor balance diagnostics — log balance adjustment near target
+    {
+        static unsigned long lastBalLogMs = 0;
+        if (millis() - lastBalLogMs >= 100) {
+            float cmdSpd = sqrtf(V * V + H * H);
+            // Only log when V or H is small (near target / precision mode)
+            if (cmdSpd < 0.3f && cmdSpd > 0.001f) {
+                // Compute raw speeds before balance
+                double rawM[4] = {mspeedf[0], mspeedf[1], mspeedf[2], mspeedf[3]};
+                Serial.printf("[BAL] cmdSpd=%.3f M1=%+4d M2=%+4d M3=%+4d M4=%+4d | avg=%.1f | Ravg=%.1f Lavg=%.1f\n",
+                    cmdSpd, s.m1, s.m2, s.m3, s.m4,
+                    (s.m1 + s.m2 + s.m3 + s.m4) / 4.0f,
+                    (s.m2 + s.m3) / 2.0f,  // right: M2, M3
+                    (s.m1 + s.m4) / 2.0f); // left: M1, M4
+            }
+            lastBalLogMs = millis();
+        }
+    }
+
     return s;
 }
 
@@ -1150,6 +1173,9 @@ void loop() {
 
     // ---- Apply motor speeds ----
     applyMotors();
+
+    // DEBUG: Wiggle diagnostics — only logs when near target
+    motionQueue.debugLogWiggle(current_x, current_y, current_angle);
 
     // ---- Update dead-reckoning ----
     // Use the same dt calculated at the top of the loop for consistency

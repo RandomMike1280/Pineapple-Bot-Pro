@@ -822,8 +822,10 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
 
             // Anti-stall: if translation speed is non-zero but below the precision
             // minimum, boost it so motors can overcome static friction.
-            // DISABLED inside settling band — near the target we WANT low speed.
-            if (!inSettlingBand) {
+            // DISABLED inside settling band and close-approach — near the target we WANT low speed.
+            // Prevents the feedback loop: closeApproach makes speed_scale tiny, boost amplifies
+            // it back up, robot overshoots, drops out of closeApproach, speed_scale drops again...
+            if (!inSettlingBand && dist_remaining >= _closeApproachDistMm) {
                 float cmdSpd = sqrtf(_currentVx * _currentVx + _currentVy * _currentVy);
                 if (cmdSpd > 0.001f && cmdSpd < _precisionMinSpeedLimitMmS) {
                     float boost = _precisionMinSpeedLimitMmS / cmdSpd;
@@ -1047,6 +1049,74 @@ void MotionQueue::abort() {
     _slipBoostRemaining = 0;
     _slipDetected = false;
 }
+
+// ============================================================================
+// DEBUG: Wiggle diagnostics — trace speed_scale components near target
+// ============================================================================
+#if 1  // Toggle to 0 to disable
+void MotionQueue::debugLogWiggle(float current_x, float current_y, float current_angle) {
+    if (_count == 0) return;
+    static unsigned long _lastWiggleLogMs = 0;
+    if (millis() - _lastWiggleLogMs < 100) return;
+    _lastWiggleLogMs = millis();
+
+    MotionSegment &seg = _segments[_head % MQ_MAX_SEGMENTS];
+    if (seg.state != SegmentState::ACTIVE && seg.state != SegmentState::HOLDING) return;
+    if (seg.vx_mm_s == 0 && seg.vy_mm_s == 0 && seg.omega_deg_s != 0) return;
+
+    float dx = seg.target_x - current_x;
+    float dy = seg.target_y - current_y;
+    float dist_remaining = sqrtf(dx * dx + dy * dy);
+    if (dist_remaining > 250.0f) return;  // only log near target
+
+    float heading_err = (Rotation(seg.target_angle) - Rotation(current_angle));
+    float speed_scale = 1.0f;
+    float settlingDist = _waypointToleranceMm * 4.0f;
+    bool inSettlingBand = (dist_remaining < settlingDist);
+
+    if (dist_remaining <= _waypointToleranceMm) {
+        speed_scale = 0.0f;
+    } else if (inSettlingBand) {
+        float settleNorm = (dist_remaining - _waypointToleranceMm) / (settlingDist - _waypointToleranceMm);
+        speed_scale = settleNorm * 0.5f;
+        if (seg.speed_mm_s > 0.001f) {
+            float floor = _precisionMinSpeedLimitMmS / seg.speed_mm_s;
+            if (speed_scale < floor) speed_scale = floor;
+        }
+    } else {
+        if (_deccelDistMm > 0.001f && dist_remaining < _deccelDistMm) {
+            speed_scale = cbrtf(dist_remaining / _deccelDistMm);
+        }
+        if (_closeApproachDistMm > 0.001f && dist_remaining < _closeApproachDistMm) {
+            float close_norm = dist_remaining / _closeApproachDistMm;
+            float close_scale = close_norm * close_norm;
+            if (close_scale < speed_scale) speed_scale = close_scale;
+            float heading_window = (_closeRotApproachDeg > _rotToleranceDeg)
+                ? (_closeRotApproachDeg * 2.0f) : (_rotToleranceDeg * 4.0f);
+            if (heading_window > 0.001f) {
+                float absErr = fabsf(heading_err);
+                float h_scale = 1.0f - (absErr / heading_window);
+                if (h_scale < 0.35f) h_scale = 0.35f;
+                if (h_scale > 1.0f) h_scale = 1.0f;
+                speed_scale *= h_scale;
+            }
+            if (seg.speed_mm_s > 0.001f) {
+                float pmin = _precisionMinSpeedLimitMmS / seg.speed_mm_s;
+                if (speed_scale < pmin) speed_scale = pmin;
+            }
+        } else if (seg.speed_mm_s > 0.001f) {
+            float min_s = _minSpeedLimitMmS / seg.speed_mm_s;
+            if (speed_scale < min_s) speed_scale = min_s;
+        }
+    }
+
+    float cmdSpd = sqrtf(_currentVx * _currentVx + _currentVy * _currentVy);
+    Serial.printf("[WIG] dist=%.1f ss=%.3f cmdVx=%.2f cmdVy=%.2f cmdSpd=%.2f close=%.0f settle=%d antiStall=%d\n",
+        dist_remaining, speed_scale, _currentVx, _currentVy, cmdSpd,
+        _closeApproachDistMm, inSettlingBand,
+        (!inSettlingBand && dist_remaining >= _closeApproachDistMm && cmdSpd > 0.001f && cmdSpd < _precisionMinSpeedLimitMmS) ? 1 : 0);
+}
+#endif
 
 const MotionSegment* MotionQueue::currentSegment() const {
     if (_count == 0) return nullptr;
