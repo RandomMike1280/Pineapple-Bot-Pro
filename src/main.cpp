@@ -13,6 +13,7 @@
 
 #include <WiFi.h>
 #include <WiFiUdp.h>
+#include <functional>
 #include "main.h"
 #include <dead_reckoning.hpp>
 #include <motion_queue.hpp>
@@ -50,13 +51,6 @@ static int doneFeedbackBlinks = 0;
 static uint32_t lastFeedbackToggleTime = 0;
 
 // ============================================================================
-// Latency / Correction Tuning
-// ============================================================================
-// CAMERA_LATENCY_MS is now DEPRECATED. The robot now uses a "Time-Ago" 
-// mechanism where the phone explicitly reports its OpenCV processing delay.
-// #define DRIFT_THRESHOLD_MM       20.0f    // apply full correction above this
-
-// ============================================================================
 // Dual-core synchronization
 // ============================================================================
 SemaphoreHandle_t stateMutex;                // protects motionQueue, deadReckoning, latencyComp
@@ -74,17 +68,19 @@ float currentVy = 0;  // mm/s
 float currentOmega = 0; // deg/s
 
 // ============================================================================
+// Shared helper — fetch current pose in one call
+// ============================================================================
+static inline void getCurrentPose(float& x, float& y, float& angle) {
+    deadReckoning.getCurrentPosition(x, y, angle);
+}
+
+// ============================================================================
 // PS2 physics-based motor control
 // ============================================================================
 
 // Kickstart state per motor
 static int mkickstart[4] = {KICKSTART_FRAMES, KICKSTART_FRAMES, KICKSTART_FRAMES, KICKSTART_FRAMES};
-
-static void rearmKickstart() {
-    for (int i = 0; i < 4; i++) {
-        mkickstart[i] = KICKSTART_FRAMES;
-    }
-}
+static bool isMoving = false;
 
 static float motorRampFactor = 0;
 static bool motorWasMoving = false;
@@ -101,21 +97,6 @@ static const uint32_t motionCommandGapHoldMs = 40;
 static const float rampIncrement =
     (1.0f - RAMP_START_FRACTION) / (RAMP_DURATION_MS / (float)CONTROL_LOOP_INTERVAL_MS);
 
-static void resetMotionControlState(bool suppressBrake) {
-    motorRampFactor = 0;
-    motorWasMoving = false;
-    lastMotionWasRotationOnly = false;
-    lastRotationOmegaDegS = 0;
-    rotationBrakeFrames = 0;
-    rotationBrakeDirection = 0;
-    suppressRotationBrake = suppressBrake;
-    translationBrakeFrames = 0;
-    translationBrakeDirX = 0;
-    translationBrakeDirY = 0;
-    rearmKickstart();
-    motionIdleStartTime = 0;
-}
-
 int sign(double x) {
     return (x > 0) - (x < 0);
 }
@@ -127,6 +108,21 @@ int speed_to_motor_duty(double speed) {
         return MOTOR_MAP_SLOPE * speed - MOTOR_MAP_OFFSET;
     }
     return 0;
+}
+
+// ============================================================================
+// Duty normalization — scale all motors proportionally to fit within DRIVE_CLAMP_HIGH
+// ============================================================================
+static void applyDutyNormalization(double mspeedf[4]) {
+    double maxDuty = 0;
+    for (int i = 0; i < 4; i++) {
+        maxDuty = max(maxDuty, abs(mspeedf[i]));
+    }
+    if (maxDuty > DRIVE_CLAMP_HIGH) {
+        for (int i = 0; i < 4; i++) {
+            mspeedf[i] = mspeedf[i] / maxDuty * DRIVE_CLAMP_HIGH;
+        }
+    }
 }
 
 MecanumSpeeds computeMecanumSpeeds(double V, double H, double A, bool lowSpeedMode, bool precisionMode) {
@@ -141,32 +137,23 @@ MecanumSpeeds computeMecanumSpeeds(double V, double H, double A, bool lowSpeedMo
     mspeedf[2] = -H + V + A;  // Front Left
     mspeedf[3] = -H - V + A;  // Back Left
 
-    // Apply speed_to_motor_duty to compensate for motor dead zone
+    // Convert to motor duty and compensate for dead zone
     for (int i = 0; i < 4; i++) {
         if (abs(mspeedf[i]) > 0) {
             mspeedf[i] = speed_to_motor_duty(mspeedf[i]);
         }
     }
 
-    // Normalize duties to [-DRIVE_CLAMP_HIGH, DRIVE_CLAMP_HIGH]
-    double maxDuty = 0;
-    for (int i = 0; i < 4; i++) {
-        maxDuty = max(maxDuty, abs(mspeedf[i]));
-    }
-    if (maxDuty > DRIVE_CLAMP_HIGH) {
-        for (int i = 0; i < 4; i++) {
-            mspeedf[i] = mspeedf[i] / maxDuty * DRIVE_CLAMP_HIGH;
-        }
-    }
+    // Normalize to keep within DRIVE_CLAMP_HIGH
+    applyDutyNormalization(mspeedf);
 
     if (precisionMode) {
         // Precision mode: use lower duty floor to enable very fine movements.
         // Also disable kickstart entirely to avoid tiny oscillations at low speeds.
-        int fineClamp = DRIVE_CLAMP_FINE;
         for (int i = 0; i < 4; i++) {
             double absSpeed = abs(mspeedf[i]);
-            if (absSpeed > 0 && absSpeed < fineClamp) {
-                mspeedf[i] = sign(mspeedf[i]) * fineClamp;
+            if (absSpeed > 0 && absSpeed < DRIVE_CLAMP_FINE) {
+                mspeedf[i] = sign(mspeedf[i]) * DRIVE_CLAMP_FINE;
             }
         }
         // No kickstart in precision mode
@@ -174,11 +161,10 @@ MecanumSpeeds computeMecanumSpeeds(double V, double H, double A, bool lowSpeedMo
         // Near the target: skip kickstart and use a much lower duty floor.
         // This allows the robot to actually crawl at tiny velocities without
         // the kickstart/clamp re-inflating them to full duty (which causes wiggle).
-        int lowClamp = DRIVE_CLAMP_LOW;  // Same floor — motors won't turn below this. Anti-wiggle comes from no kickstart.
         for (int i = 0; i < 4; i++) {
             double absSpeed = abs(mspeedf[i]);
-            if (absSpeed > 0 && absSpeed < lowClamp) {
-                mspeedf[i] = sign(mspeedf[i]) * lowClamp;
+            if (absSpeed > 0 && absSpeed < DRIVE_CLAMP_LOW) {
+                mspeedf[i] = sign(mspeedf[i]) * DRIVE_CLAMP_LOW;
             }
         }
         // Don't rearm kickstart in low-speed mode
@@ -275,51 +261,81 @@ if (desiredSpeed < 8.0f) {
 }
 
 // ============================================================================
-// Apply motor speeds from current motion queue state
+// Motor state helpers
 // ============================================================================
-void applyMotors() {
-    // Acceleration ramp state — persists across calls
-    float prevCurrentVx = currentVx;
-    float prevCurrentVy = currentVy;
-    float prevCurrentOmega = currentOmega;
-    float vx, vy, omega;
-    motionQueue.getCurrentVelocity(vx, vy, omega);
-    currentVx = vx;
-    currentVy = vy;
-    currentOmega = omega;
-    const MotionSegment* seg = motionQueue.currentSegment();
 
-    bool isMoving = (vx != 0 || vy != 0 || omega != 0);
-    bool rotationOnly = (omega != 0 && vx == 0 && vy == 0);
-
-    if (!isMoving && motorWasMoving && lastMotionWasRotationOnly &&
-        !suppressRotationBrake && rotationBrakeFrames == 0 &&
-        fabsf(lastRotationOmegaDegS) >= ROTATION_BRAKE_MIN_OMEGA_DEG_S) {
-        rotationBrakeFrames = ROTATION_BRAKE_FRAMES;
-        rotationBrakeDirection = (lastRotationOmegaDegS > 0) ? 1 : -1;
+static void rearmKickstartOnly() {
+    for (int i = 0; i < 4; i++) {
+        mkickstart[i] = KICKSTART_FRAMES;
     }
+}
 
+static void resetAllMotionState(bool suppressBrake) {
+    motorRampFactor = 0;
+    motorWasMoving = false;
+    lastMotionWasRotationOnly = false;
+    lastRotationOmegaDegS = 0;
+    rotationBrakeFrames = 0;
+    rotationBrakeDirection = 0;
+    suppressRotationBrake = suppressBrake;
+    translationBrakeFrames = 0;
+    translationBrakeDirX = 0;
+    translationBrakeDirY = 0;
+    rearmKickstartOnly();
+    motionIdleStartTime = 0;
+}
+
+static void rearmKickstart() {
+    rearmKickstartOnly();
+}
+
+static void resetMotionControlState(bool suppressBrake) {
+    resetAllMotionState(suppressBrake);
+}
+
+// ============================================================================
+// Brake duty computation — shared by translation and rotation brakes
+// ============================================================================
+
+static MecanumSpeeds computeBrakeDuty(float brakeDirX, float brakeDirY,
+                                      float headingAngle, int brakeDuty) {
+    double cosA = cos(headingAngle);
+    double sinA = sin(headingAngle);
+    double bV = -(brakeDirX * cosA + brakeDirY * sinA);
+    double bH = -(brakeDirX * sinA - brakeDirY * cosA);
+    double scale = (double)brakeDuty / (double)DRIVE_CLAMP_HIGH;
+    return computeMecanumSpeeds(bV * scale, bH * scale, 0, false, false);
+}
+
+// ============================================================================
+// Rotation brake — kick brief reverse thrust to kill angular momentum
+// ============================================================================
+
+static bool applyRotationBrake() {
     if (!isMoving && rotationBrakeFrames > 0 && rotationBrakeDirection != 0) {
         currentVx = 0;
         currentVy = 0;
-        currentOmega = 0; // Decouple from dead-reckoning during the brake kick
+        currentOmega = 0;
 #ifndef TEST_MODE
         Motor1.Run(-rotationBrakeDirection * ROTATION_BRAKE_DUTY);
         Motor2.Run(-rotationBrakeDirection * ROTATION_BRAKE_DUTY);
-        Motor3.Run(rotationBrakeDirection * ROTATION_BRAKE_DUTY);
-        Motor4.Run(rotationBrakeDirection * ROTATION_BRAKE_DUTY);
+        Motor3.Run( rotationBrakeDirection * ROTATION_BRAKE_DUTY);
+        Motor4.Run( rotationBrakeDirection * ROTATION_BRAKE_DUTY);
 #endif
         rotationBrakeFrames--;
         if (rotationBrakeFrames == 0) {
             resetMotionControlState(false);
         }
-        return;
+        return true;
     }
+    return false;
+}
 
-    // --- Active Translation Brake ---
-    // When the queue commands zero velocity but the robot is still physically
-    // moving (coasting), apply reverse motor thrust to kill all momentum.
-    // Uses Kalman-estimated velocity to determine brake direction.
+// ============================================================================
+// Translation brake — reverse thrust to kill physical coasting momentum
+// ============================================================================
+
+static bool detectAndStartTranslationBrake() {
     if (!isMoving && motorWasMoving && !lastMotionWasRotationOnly &&
         translationBrakeFrames == 0 && !suppressRotationBrake) {
         float estVx, estVy;
@@ -327,31 +343,19 @@ void applyMotors() {
         float obsSpeed = sqrtf(estVx * estVx + estVy * estVy);
         if (obsSpeed >= TRANSLATION_BRAKE_MIN_SPEED_MM_S) {
             translationBrakeFrames = TRANSLATION_BRAKE_FRAMES;
-            translationBrakeDirX = estVx / obsSpeed;  // unit vector of coasting direction
+            translationBrakeDirX = estVx / obsSpeed;
             translationBrakeDirY = estVy / obsSpeed;
         }
     }
-
     if (!isMoving && translationBrakeFrames > 0) {
         currentVx = 0;
         currentVy = 0;
-        currentOmega = 0; // Decouple from dead-reckoning during brake
-        // Compute reverse motor command from brake direction
+        currentOmega = 0;
         float cx, cy, c_angle;
-        deadReckoning.getCurrentPosition(cx, cy, c_angle);
-        double headingRad = c_angle * (PI / 180.0f);
-        double cosA = cos(headingRad);
-        double sinA = sin(headingRad);
-        // Reverse of observed velocity direction → brake thrust
-        double bV = -(translationBrakeDirX * cosA + translationBrakeDirY * sinA);
-        double bH = -(translationBrakeDirX * sinA - translationBrakeDirY * cosA);
-        // Scale to brake duty
-        double scale = (double)TRANSLATION_BRAKE_DUTY / (double)DRIVE_CLAMP_HIGH;
-        bV *= scale;
-        bH *= scale;
-        // Apply mecanum axis correction (same as normal path)
-        bH /= sqrt(2.0);
-        MecanumSpeeds bs = computeMecanumSpeeds(bV, bH, 0, false);
+        getCurrentPose(cx, cy, c_angle);
+        MecanumSpeeds bs = computeBrakeDuty(
+            translationBrakeDirX, translationBrakeDirY,
+            c_angle * (PI / 180.0f), TRANSLATION_BRAKE_DUTY);
 #ifndef TEST_MODE
         Motor1.Run(bs.m1);
         Motor2.Run(bs.m2);
@@ -362,19 +366,149 @@ void applyMotors() {
         if (translationBrakeFrames == 0) {
             resetMotionControlState(false);
         }
-        return;
+        return true;
+    }
+    return false;
+}
+
+// ============================================================================
+// Detect precision / single-motor operating modes based on distance and speed
+// ============================================================================
+
+static void detectOperatingMode(const MotionSegment* seg, float cmdMag,
+                                bool& precisionMode, bool& singleMotorMode) {
+    precisionMode = false;
+    singleMotorMode = false;
+    if (seg && seg->state == SegmentState::ACTIVE) {
+        float cx, cy, c_angle;
+        getCurrentPose(cx, cy, c_angle);
+        float dx = seg->target_x - cx;
+        float dy = seg->target_y - cy;
+        float distRemaining = sqrtf(dx * dx + dy * dy);
+
+        logger.update("DEBUG", "DIST_CHECK: dist=%.2f cmdMag=%.3f", distRemaining, cmdMag);
+
+        if (distRemaining < 15.0f && cmdMag > 0.001f && cmdMag < 10.0f) {
+            singleMotorMode = true;
+        } else if (distRemaining < PRECISION_MODE_THRESH_MM &&
+                   cmdMag > 0.001f && cmdMag < 15.0f) {
+            precisionMode = true;
+        }
+    }
+}
+
+// ============================================================================
+// Compute heading-frame (V, H) velocities from world-frame (vx, vy, omega)
+// Includes: heading transform, drift trim, S-curve feedforward, omega
+// ============================================================================
+
+static void computeHeadingVelocities(float vx, float vy, float omega,
+                                    float currentAngle, const MotionSegment* seg,
+                                    double& V, double& H, double& A) {
+    float c_angle = currentAngle;
+    double V_out = 0, H_out = 0;
+
+    if (SPEED_FAST_MM_S > 0.1f) {
+        double headingRad = c_angle * (PI / 180.0f);
+        double cosA = cos(headingRad);
+        double sinA = sin(headingRad);
+        V_out = (vx * cosA + vy * sinA) / SPEED_FAST_MM_S;
+        H_out = (vx * sinA - vy * cosA) / SPEED_FAST_MM_S;
     }
 
+    V_out *= motorRampFactor;
+    H_out *= motorRampFactor;
+
+    // Mecanum H axis is naturally faster by √2 — normalize to match V
+    H_out /= sqrt(2.0);
+
+    // Drift trim: pre-rotate (V, H) to counteract systematic lateral bias
+    {
+        float trim_deg = 0;
+        if (seg) {
+            switch (seg->speed) {
+                case SpeedLevel::SLOW:   trim_deg = DRIFT_TRIM_SLOW_DEG;   break;
+                case SpeedLevel::NORMAL: trim_deg = DRIFT_TRIM_NORMAL_DEG; break;
+                case SpeedLevel::FAST:   trim_deg = DRIFT_TRIM_FAST_DEG;   break;
+                default: break;
+            }
+        }
+        if (trim_deg != 0) {
+            float trim_rad = trim_deg * (PI / 180.0f);
+            float cosT = cosf(trim_rad);
+            float sinT = sinf(trim_rad);
+            double H2 = H_out * cosT - V_out * sinT;
+            double V2 = H_out * sinT + V_out * cosT;
+            V_out = V2;
+            H_out = H2;
+        }
+    }
+
+    // S-curve feedforward: compensate inertia and friction
+    float ffVx, ffVy, ffOmega;
+    motionQueue.getFeedforward(ffVx, ffVy, ffOmega);
+    if (SPEED_FAST_MM_S > 0.1f) {
+        double headingRad = c_angle * (PI / 180.0f);
+        double cosA = cos(headingRad);
+        double sinA = sin(headingRad);
+        V_out += (ffVx * cosA + ffVy * sinA) / SPEED_FAST_MM_S;
+        H_out += (ffVx * sinA - ffVy * cosA) / SPEED_FAST_MM_S;
+    }
+
+    V = V_out;
+    H = H_out;
+
+    // Angular velocity
+    bool rotationOnly = (omega != 0 && vx == 0 && vy == 0);
+    A = 0;
+    if (SPEED_FAST_DEG_S > 0.1f) {
+        A = -omega / SPEED_FAST_DEG_S;
+        A *= rotationOnly ? 1.0 : motorRampFactor;
+    }
+}
+
+// ============================================================================
+// Apply motor speeds from current motion queue state
+// ============================================================================
+void applyMotors() {
+    // Capture previous velocity for gap-hold bridging
+    float prevCurrentVx = currentVx;
+    float prevCurrentVy = currentVy;
+    float prevCurrentOmega = currentOmega;
+
+    float vx, vy, omega;
+    motionQueue.getCurrentVelocity(vx, vy, omega);
+    currentVx = vx;
+    currentVy = vy;
+    currentOmega = omega;
+    const MotionSegment* seg = motionQueue.currentSegment();
+
+    isMoving = (vx != 0 || vy != 0 || omega != 0);
+    bool rotationOnly = (omega != 0 && vx == 0 && vy == 0);
+
+    // --- Trigger rotation brake when transitioning from rotation to stop ---
+    if (!isMoving && motorWasMoving && lastMotionWasRotationOnly &&
+        !suppressRotationBrake && rotationBrakeFrames == 0 &&
+        fabsf(lastRotationOmegaDegS) >= ROTATION_BRAKE_MIN_OMEGA_DEG_S) {
+        rotationBrakeFrames = ROTATION_BRAKE_FRAMES;
+        rotationBrakeDirection = (lastRotationOmegaDegS > 0) ? 1 : -1;
+    }
+
+    // --- Rotation brake execution ---
+    if (applyRotationBrake()) return;
+
+    // --- Translation brake detection and execution ---
+    if (detectAndStartTranslationBrake()) return;
+
+    // --- Idle: coasting bridge, then stop ---
     if (!isMoving) {
-        // #region agent log - early return path analysis
-        logger.update("DEBUG", "!isMoving: motorWasMoving=%d rotOnly=%d rotBrake=%d transBrake=%d",
-            motorWasMoving, lastMotionWasRotationOnly,
-            rotationBrakeFrames > 0, translationBrakeFrames > 0);
-        // #endregion
+        if (motorWasMoving) {
+            logger.update("DEBUG", "!isMoving: motorWasMoving=%d rotOnly=%d rotBrake=%d transBrake=%d",
+                motorWasMoving, lastMotionWasRotationOnly,
+                rotationBrakeFrames > 0, translationBrakeFrames > 0);
+        }
 
         if (motionIdleStartTime == 0) motionIdleStartTime = millis();
-        // Gap-hold: keep previous velocity briefly to bridge timing gaps between segments.
-        // Skip this in HOLDING state — we've arrived and want instant stop, not coasting.
         const MotionSegment* holdSeg = motionQueue.currentSegment();
         bool isHolding = holdSeg && holdSeg->state == SegmentState::HOLDING;
         if (!isHolding && motorWasMoving && (millis() - motionIdleStartTime) <= motionCommandGapHoldMs) {
@@ -384,12 +518,12 @@ void applyMotors() {
             return;
         }
 
-        #ifndef TEST_MODE
+#ifndef TEST_MODE
         Motor1.Stop();
         Motor2.Stop();
         Motor3.Stop();
         Motor4.Stop();
-        #endif
+#endif
 
         if (millis() - motionIdleStartTime > 50) {
             resetMotionControlState(false);
@@ -398,8 +532,8 @@ void applyMotors() {
     }
     motionIdleStartTime = 0;
 
+    // --- Startup: reset brake state, start acceleration ramp ---
     suppressRotationBrake = false;
-    // Auto-suppress brake for very short micro-refinement bursts
     if (seg && seg->duration_ms > 0 && seg->duration_ms < 150) {
         suppressRotationBrake = true;
     }
@@ -416,109 +550,20 @@ void applyMotors() {
         if (motorRampFactor > 1.0f) motorRampFactor = 1.0f;
     }
 
+    // --- Compute heading-frame velocities ---
     float cx, cy, c_angle;
-    deadReckoning.getCurrentPosition(cx, cy, c_angle);
+    getCurrentPose(cx, cy, c_angle);
+    double V, H, A;
+    computeHeadingVelocities(vx, vy, omega, c_angle, seg, V, H, A);
 
-    double V = 0, H = 0;
-    if (SPEED_FAST_MM_S > 0.1f) {
-        double headingRad = c_angle * (PI / 180.0f);
-        double cosA = cos(headingRad);
-        double sinA = sin(headingRad);
-        V = (vx * cosA + vy * sinA) / SPEED_FAST_MM_S;
-        H = (vx * sinA - vy * cosA) / SPEED_FAST_MM_S;
-    }
-
-    V *= motorRampFactor;
-    H *= motorRampFactor;
-
-    // Mecanum wheels: H=forward(vertical) is √2× faster than V=strafe(horizontal).
-    // Divide H by √2 to slow vertical to match horizontal's natural speed.
-    // Don't boost V — horizontal is already reliable at its natural speed.
-    H /= sqrt(2.0);
-
-    // Drift trim: pre-rotate (V, H) CCW by a speed-dependent angle to counteract
-    // the measured systematic leftward bias in translation.
-    // With corrected mecanum formula, positive H = rightward physical strafe.
-    // To compensate leftward drift, we need positive H → CW rotation of velocity.
-    {
-        float trim_deg = 0;
-        if (seg) {
-            switch (seg->speed) {
-                case SpeedLevel::SLOW:   trim_deg = DRIFT_TRIM_SLOW_DEG;   break;
-                case SpeedLevel::NORMAL: trim_deg = DRIFT_TRIM_NORMAL_DEG; break;
-                case SpeedLevel::FAST:   trim_deg = DRIFT_TRIM_FAST_DEG;   break;
-                default: break;
-            }
-        }
-        if (trim_deg != 0) {
-            float trim_rad = trim_deg * (PI / 180.0f);
-            float cosT = cosf(trim_rad);
-            float sinT = sinf(trim_rad);
-            // CCW rotation in (H, V) plane:
-            //   H' = H*cos - V*sin   (adds negative H for forward V → rightward physical)
-            //   V' = H*sin + V*cos
-            double H2 = H * cosT - V * sinT;
-            double V2 = H * sinT + V * cosT;
-            V = V2;
-            H = H2;
-        }
-    }
-
-    float target_angle = seg ? seg->target_angle : c_angle;
-
-    float angle_err = target_angle - c_angle;
-    while (angle_err > 180.0f) angle_err -= 360.0f;
-    while (angle_err < -180.0f) angle_err += 360.0f;
-
-    double A = 0;
-    if (SPEED_FAST_DEG_S > 0.1f) {
-        A = -omega / SPEED_FAST_DEG_S;  // invert: math CCW+ → mecanum CW+
-        A *= rotationOnly ? 1.0 : motorRampFactor;
-    }
-
-    // --- Feedforward compensation from S-curve profiler ---
-    // Add acceleration-proportional terms to overcome inertia/friction
-    float ffVx, ffVy, ffOmega;
-    motionQueue.getFeedforward(ffVx, ffVy, ffOmega);
-    if (SPEED_FAST_MM_S > 0.1f) {
-        double headingRad = c_angle * (PI / 180.0f);
-        double cosA = cos(headingRad);
-        double sinA = sin(headingRad);
-        V += (ffVx * cosA + ffVy * sinA) / SPEED_FAST_MM_S;
-        H += (ffVx * sinA - ffVy * cosA) / SPEED_FAST_MM_S;
-    }
-    if (SPEED_FAST_DEG_S > 0.1f) {
-        A += -ffOmega / SPEED_FAST_DEG_S;
-    }
-
-    // Detect settling band: commanded speed is very low → use low-speed motor mode
-    // to prevent kickstart and DRIVE_CLAMP_LOW from re-inflating tiny velocities
+    // --- Detect operating mode ---
     float cmdMag = sqrtf(vx * vx + vy * vy);
-    bool lowSpeedMode = (cmdMag > 0.001f && cmdMag < 10.0f);  // below ~10 mm/s
-    
+    bool lowSpeedMode = (cmdMag > 0.001f && cmdMag < 10.0f);
     bool precisionMode = false;
     bool singleMotorMode = false;
-    if (seg && seg->state == SegmentState::ACTIVE) {
-        float cx, cy, c_angle;
-        deadReckoning.getCurrentPosition(cx, cy, c_angle);
-        float dx = seg->target_x - cx;
-        float dy = seg->target_y - cy;
-        float distRemaining = sqrtf(dx * dx + dy * dy);
+    detectOperatingMode(seg, cmdMag, precisionMode, singleMotorMode);
 
-        // #region agent log - single motor mode detection
-        logger.update("DEBUG", "DIST_CHECK: dist=%.2f cmdMag=%.3f", distRemaining, cmdMag);
-        // #endregion
-        
-        // Single-motor mode: very close to target, extremely slow
-        // Only 1 wheel moves → minimal movement (~1-2mm steps)
-        if (distRemaining < 15.0f && cmdMag > 0.001f && cmdMag < 10.0f) {
-            singleMotorMode = true;
-        } else if (distRemaining < PRECISION_MODE_THRESH_MM && 
-                   cmdMag > 0.001f && cmdMag < 15.0f) {
-            precisionMode = true;
-        }
-    }
-    
+    // --- Compute motor duties ---
     MecanumSpeeds s;
     if (singleMotorMode) {
         s = computeSingleMotorSpeeds(V, H);
@@ -526,10 +571,8 @@ void applyMotors() {
         s = computeMecanumSpeeds(V, H, A, lowSpeedMode, precisionMode);
     }
 
-    // #region agent log - motor command output
     logger.update("MOTOR_CMD", "singleMotor=%d M1=%d M2=%d M3=%d M4=%d",
         singleMotorMode, s.m1, s.m2, s.m3, s.m4);
-    // #endregion
 
 #if ENABLE_DEBUG_LOGGING
     static unsigned long lastDebugTime = 0;
@@ -548,9 +591,7 @@ void applyMotors() {
         lastPrintTime = millis();
     }
 #else
-    // #region agent log - about to run motors
     logger.update("DEBUG", "RUNNING: M1=%d M2=%d M3=%d M4=%d", s.m1, s.m2, s.m3, s.m4);
-    // #endregion
     Motor1.Run(s.m1);
     Motor2.Run(s.m2);
     Motor3.Run(s.m3);
@@ -562,84 +603,77 @@ void applyMotors() {
 }
 
 // ============================================================================
+// Enqueue helper with automatic pose fetch and success/error logging
+// ============================================================================
+static bool enqueueAndLog(const char* cmdName,
+                           std::function<bool(float cx, float cy, float c_angle)> enqueueFn) {
+    float cx, cy, c_angle;
+    getCurrentPose(cx, cy, c_angle);
+    bool ok = enqueueFn(cx, cy, c_angle);
+    if (!ok) {
+        logger.important("[ERR] %s rejected — queue full!", cmdName);
+    }
+    return ok;
+}
+
+// ============================================================================
 // Process a pre-parsed UDP message (called from Core 0 under mutex)
 // ============================================================================
 void handleParsedMessage(const UdpMessage &msg) {
     switch (msg.type) {
         case MsgType::MOVE: {
-            // Get current estimated position for segment target computation
-            float cx, cy, c_angle;
-            deadReckoning.getCurrentPosition(cx, cy, c_angle);
-
-            bool ok = motionQueue.enqueue(
-                msg.direction, msg.distance_mm,
-                msg.speed, msg.correctionPolicy, msg.servoAction,
-                cx, cy, c_angle
-            );
-            if (ok) {
+            if (enqueueAndLog("MOVE", [&](float cx, float cy, float c_angle) {
+                return motionQueue.enqueue(
+                    msg.direction, msg.distance_mm,
+                    msg.speed, msg.correctionPolicy, msg.servoAction,
+                    cx, cy, c_angle);
+            })) {
                 logger.log("[CMD] MOVE: dir=%d dist=%d spd=%d policy=%d (q=%d)",
                     (int)msg.direction, msg.distance_mm, (int)msg.speed,
                     (int)msg.correctionPolicy, motionQueue.remaining());
-            } else {
-                logger.important("[ERR] MOVE rejected — queue full!");
             }
             break;
         }
 
         case MsgType::MOVE_DURATION: {
-            float cx, cy, c_angle;
-            deadReckoning.getCurrentPosition(cx, cy, c_angle);
-
-            bool ok = motionQueue.enqueueDuration(
-                msg.direction, msg.duration_ms,
-                msg.speed, msg.correctionPolicy,
-                cx, cy, c_angle
-            );
-            if (ok) {
+            if (enqueueAndLog("MOVE_DUR", [&](float cx, float cy, float c_angle) {
+                return motionQueue.enqueueDuration(
+                    msg.direction, msg.duration_ms,
+                    msg.speed, msg.correctionPolicy,
+                    cx, cy, c_angle);
+            })) {
                 logger.log("[CMD] MOVE_DUR: dir=%d dur=%lums spd=%d policy=%d (q=%d)",
                     (int)msg.direction, (unsigned long)msg.duration_ms, (int)msg.speed,
                     (int)msg.correctionPolicy, motionQueue.remaining());
-            } else {
-                logger.important("[ERR] MOVE_DUR rejected — queue full!");
             }
             break;
         }
 
         case MsgType::ROTATE_DURATION: {
-            float cx, cy, c_angle;
-            deadReckoning.getCurrentPosition(cx, cy, c_angle);
-
-            bool ok = motionQueue.enqueueRotateDuration(
-                msg.rotationDirection, msg.duration_ms,
-                msg.speed, msg.correctionPolicy,
-                cx, cy, c_angle
-            );
-            if (ok) {
+            if (enqueueAndLog("ROT_DUR", [&](float cx, float cy, float c_angle) {
+                return motionQueue.enqueueRotateDuration(
+                    msg.rotationDirection, msg.duration_ms,
+                    msg.speed, msg.correctionPolicy,
+                    cx, cy, c_angle);
+            })) {
                 logger.log("[CMD] ROT_DUR: dir=%d dur=%lums spd=%d policy=%d (q=%d)",
                     (int)msg.rotationDirection, (unsigned long)msg.duration_ms, (int)msg.speed,
                     (int)msg.correctionPolicy, motionQueue.remaining());
-            } else {
-                logger.important("[ERR] ROT_DUR rejected — queue full!");
             }
             break;
         }
 
         case MsgType::WAYPOINT: {
             float cx, cy, c_angle;
-            deadReckoning.getCurrentPosition(cx, cy, c_angle);
-
-            // Same-target optimization: if already heading to this destination,
-            // skip abort()+enqueue so the deceleration ramp runs uninterrupted.
-            // This eliminates the kickstart surge caused by re-launching the segment
-            // every time the phone resends the same W command at 500ms intervals.
+            getCurrentPose(cx, cy, c_angle);
             const MotionSegment* cur = motionQueue.currentSegment();
             bool sameTarget = (cur != nullptr &&
-                               !cur->isDurationBased &&
-                               (cur->state == SegmentState::ACTIVE ||
-                                cur->state == SegmentState::HOLDING) &&
-                               fabsf(cur->target_x - msg.target_x) < 15.0f &&
-                               fabsf(cur->target_y - msg.target_y) < 15.0f &&
-                               msg.servoAction == ServoAction::NONE);
+                              !cur->isDurationBased &&
+                              (cur->state == SegmentState::ACTIVE ||
+                               cur->state == SegmentState::HOLDING) &&
+                              fabsf(cur->target_x - msg.target_x) < 15.0f &&
+                              fabsf(cur->target_y - msg.target_y) < 15.0f &&
+                              msg.servoAction == ServoAction::NONE);
 
             if (!sameTarget) {
                 motionQueue.abort();
@@ -662,17 +696,14 @@ void handleParsedMessage(const UdpMessage &msg) {
 
         case MsgType::DONE: {
             logger.important("[MISSION] DONE!");
-            doneFeedbackBlinks = 4; // 2 full blinks (On-Off-On-Off)
+            doneFeedbackBlinks = 4;
             break;
         }
 
         case MsgType::ROTATE: {
             float cx, cy, c_angle;
-            deadReckoning.getCurrentPosition(cx, cy, c_angle);
-
-            // Clear queue for immediate rotation override
+            getCurrentPose(cx, cy, c_angle);
             motionQueue.abort();
-
             bool ok = motionQueue.enqueueRotate(
                 msg.target_angle, msg.speed, msg.correctionPolicy,
                 cx, cy, c_angle
@@ -688,9 +719,6 @@ void handleParsedMessage(const UdpMessage &msg) {
         }
 
         case MsgType::CAM: {
-            // We are using absolute clock synchronization. The phone sends the 
-            // exact phone-clock timestamp of the frame capture. 
-            // the LatencyCompensator translates this to robot-time via the offset.
             latencyComp.onCameraUpdate(
                 msg.cam_timestamp, msg.cam_x, msg.cam_y, msg.cam_angle,
                 CORRECTION_BLEND_MS
@@ -699,8 +727,6 @@ void handleParsedMessage(const UdpMessage &msg) {
         }
 
         case MsgType::PING: {
-            // Respond immediately with PONG. 
-            // Note: The phone will include its own timestamp in its PONG reply to us.
             char pongBuf[32];
             int pongLen = buildPongMessage(pongBuf, sizeof(pongBuf), msg.ping_timestamp);
             udp.beginPacket(udp.remoteIP(), udpPort);
@@ -710,7 +736,6 @@ void handleParsedMessage(const UdpMessage &msg) {
         }
 
         case MsgType::PONG: {
-            // Include the remote (phone) timestamp to update our clock offset
             latencyComp.onPong(msg.ping_timestamp, msg.remote_timestamp);
             logger.log("[RTT] %lu ms", (unsigned long)latencyComp.getRttMs());
             break;
@@ -718,11 +743,8 @@ void handleParsedMessage(const UdpMessage &msg) {
 
         case MsgType::VELOCITY: {
             float cx, cy, c_angle;
-            deadReckoning.getCurrentPosition(cx, cy, c_angle);
-
-            // Abort existing queue (smooth transition — no abortFlag)
+            getCurrentPose(cx, cy, c_angle);
             motionQueue.abort();
-
             bool ok = motionQueue.enqueueVelocity(
                 msg.vel_vx, msg.vel_vy, msg.vel_omega,
                 msg.duration_ms,
@@ -742,7 +764,7 @@ void handleParsedMessage(const UdpMessage &msg) {
             logger.important("[CMD] ABORT — emergency stop!");
             motionQueue.abort();
             currentVx = currentVy = currentOmega = 0;
-            abortFlag = true;   // Core 1 will stop motors immediately
+            abortFlag = true;
             break;
         }
 
@@ -756,7 +778,6 @@ void handleParsedMessage(const UdpMessage &msg) {
         case MsgType::SERVO_EXEC: {
             logger.log("[CMD] SERVO_EXEC: %d", (int)msg.servoAction);
             executeServoAction(msg.servoAction);
-            // Rearm kickstart in case motors were off
             rearmKickstart();
             break;
         }
@@ -765,7 +786,7 @@ void handleParsedMessage(const UdpMessage &msg) {
             logger.log("[UDP] Unhandled message type: %d", (int)msg.type);
             break;
     }
-} // Added closing bracket here
+}
 
 // ============================================================================
 // Send telemetry status to phone (every STATUS_INTERVAL_MS)
@@ -960,10 +981,23 @@ void udpTask(void* parameter) {
         // --- Periodic broadcasts ---
         uint32_t now = millis();
         if (now - lastStatusTime >= STATUS_INTERVAL_MS) {
-            xSemaphoreTake(stateMutex, portMAX_DELAY);
-            sendStatus();
-            xSemaphoreGive(stateMutex);
+            // Capture state under mutex, then send outside
+            float x, y, angle;
+            float vx, vy;
+            deadReckoning.getCurrentPosition(x, y, angle);
+            motionQueue.getEstimatedVelocity(vx, vy);
             lastStatusTime = now;
+            xSemaphoreTake(stateMutex, portMAX_DELAY);
+            int qRemaining = motionQueue.remaining();
+            float driftMag = latencyComp.getLastDriftMagnitude();
+            xSemaphoreGive(stateMutex);
+
+            char buf[80];
+            int len = buildStatusMessage(buf, sizeof(buf),
+                x, y, angle, qRemaining, driftMag, vx, vy);
+            udp.beginPacket(phoneIP, udpPort);
+            udp.write((uint8_t*)buf, len);
+            udp.endPacket();
         }
 
         if (now - lastHelloTime >= HELLO_INTERVAL_MS) {

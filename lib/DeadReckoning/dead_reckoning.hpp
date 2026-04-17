@@ -11,6 +11,12 @@
 // integration of velocity.  Stores a rolling history of past positions so the
 // latency-compensator can look up "where did we think we were at time T?"
 // and apply smooth corrections without jarring jumps.
+//
+// The engine uses a two-tier position model:
+//   1. Internal odometer  — continuously integrated from velocity
+//   2. Global anchor     — absolute correction from camera observations
+//
+// Current position = anchor + (odometer - odometer_at_anchor_time)
 // ============================================================================
 
 // Ring-buffer depth — must be a power of 2 for fast modulo via bitmask
@@ -21,7 +27,7 @@ struct PositionSnapshot {
     uint32_t timestamp_ms;   // millis() at which this snapshot was taken
     float    ix;             // internal odometer X in mm
     float    iy;             // internal odometer Y in mm
-    Rotation ia;             // internal odometer angle
+    Rotation ia;              // internal odometer angle
 };
 
 class DeadReckoning {
@@ -51,29 +57,26 @@ public:
     void getOdoPosition(float &out_x, float &out_y, float &out_angle) const;
 
 private:
-    // --- Store 1: Internal Odometer (Continuous Integration) ---
+    // === Odometer (continuous integration) ===
     float    _ix;
     float    _iy;
     Rotation _ia;
 
-    // --- Store 2: Global Anchor (Camera Truth) ---
+    // === Global Anchor (absolute camera correction) ===
     float    _gx;
     float    _gy;
     Rotation _ga;
 
-    // --- Store 3: Anchor Sync (Odometer at the moment of capture) ---
+    // === Odometer value at the time of last anchor capture ===
     float    _ax;
     float    _ay;
     Rotation _aa;
 
-    // --- Store 4: Calculated Offset (ix - ax) ---
-    // (Calculated on the fly in getCurrentPosition)
-
-    // --- Distance Calibration ---
+    // === Distance Calibration ===
     float _distFactorH;
     float _distFactorV;
 
-    // --- History ring buffer ---
+    // === Position History Ring Buffer (for latency compensation) ===
     PositionSnapshot _history[DR_HISTORY_SIZE];
     uint16_t         _historyHead;   // next write index
     uint16_t         _historyCount;  // entries written (saturates at DR_HISTORY_SIZE)
