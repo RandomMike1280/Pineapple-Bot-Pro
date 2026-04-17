@@ -10,6 +10,9 @@
 // Commands like "move right 500mm at fast speed" are enqueued and executed
 // back-to-back with no stops between them.  Each segment knows its target
 // position and the queue transitions seamlessly from one to the next.
+//
+// The queue runs on Core 1 at ~333 Hz.  Call tick() every control loop
+// iteration to advance the queue and compute the current velocity target.
 // ============================================================================
 
 #define MQ_MAX_SEGMENTS 16
@@ -299,35 +302,32 @@ public:
     bool segmentJustCompleted;
 
 private:
+    // === Queue State ===
     MotionSegment _segments[MQ_MAX_SEGMENTS];
-    int           _head;      // index of the current/next segment to execute
-    int           _tail;      // index of next free slot
-    int           _count;     // number of segments in queue (including active)
+    int           _head;                    // index of the current/next segment to execute
+    int           _tail;                    // index of next free slot
+    int           _count;                   // number of segments in queue (including active)
 
-    // Speed calibration
-    float _speedSlow;
-    float _speedNormal;
-    float _speedFast;
+    // === Calibration ===
+    float _speedSlow;                       // mm/s at SLOW speed level
+    float _speedNormal;                      // mm/s at NORMAL speed level
+    float _speedFast;                        // mm/s at FAST speed level
+    float _rotSlow;                         // deg/s at SLOW speed level
+    float _rotNormal;                       // deg/s at NORMAL speed level
+    float _rotFast;                          // deg/s at FAST speed level
+    float _distFactorH;                      // horizontal (strafe) distance factor
+    float _distFactorV;                      // vertical (forward/back) distance factor
 
-    // Rotation speed calibration
-    float _rotSlow;
-    float _rotNormal;
-    float _rotFast;
+    // === Runtime State ===
+    float _currentVx;                        // current world-frame velocity, x (mm/s)
+    float _currentVy;                        // current world-frame velocity, y (mm/s)
+    float _currentOmega;                     // current angular velocity (deg/s)
 
-    // Distance Calibration Scaling
-    float _distFactorH;
-    float _distFactorV;
-
-    // Active runtime state (filtered/decelerated)
-    float _currentVx;
-    float _currentVy;
-    float _currentOmega;
-
-    // Tuning Parameters (Injected from main.h)
-    float _deccelDistMm;
-    float _rotDeccelDeg;
-    float _minSpeedLimitMmS;
-    float _minRotLimitDegS;
+    // === Deceleration & Precision ===
+    float _deccelDistMm;                     // start decelerating at this distance to target
+    float _rotDeccelDeg;                    // start decelerating rotation at this angle
+    float _minSpeedLimitMmS;                 // floor speed during deceleration
+    float _minRotLimitDegS;                  // floor rotation speed during deceleration
     float _precisionMinSpeedLimitMmS;
     float _precisionMinRotLimitDegS;
     float _closeApproachDistMm;
@@ -337,14 +337,14 @@ private:
     float _rotStabilizationGain;
     float _maxStabilizationOmega;
 
-    // Velocity tracking for predictive steering
+    // === Velocity Estimation ===
     float _prevPoseX, _prevPoseY;
     bool  _hasPreviousPose;
-    float _estVx, _estVy;           // Kalman-estimated velocity (mm/s)
-    float _lookaheadTimeS;           // base lookahead (seconds)
-    uint32_t _tickTimeMs;            // monotonic tick timer
+    float _estVx, _estVy;                    // Kalman-estimated velocity (mm/s)
+    float _lookaheadTimeS;                   // base lookahead (seconds)
+    uint32_t _tickTimeMs;                   // monotonic tick timer
 
-    // S-curve trajectory profiler (one for translation, one for rotation)
+    // === S-Curve Profiler ===
     SCurveProfile _scurveTrans;
     SCurveProfile _scurveRot;
     float _scurveMaxAccelMmS2;
@@ -352,35 +352,35 @@ private:
     float _scurveMaxRotAccelDegS2;
     float _scurveMaxRotJerkDegS3;
 
-    // Feedforward gains
-    float _ffKv, _ffKa;             // linear velocity/accel feedforward
-    float _ffKvRot, _ffKaRot;       // rotational velocity/accel feedforward
-    float _ffVx, _ffVy, _ffOmega;   // computed feedforward outputs
+    // === Feedforward ===
+    float _ffKv, _ffKa;                     // linear velocity/acceleration feedforward
+    float _ffKvRot, _ffKaRot;              // rotational velocity/acceleration feedforward
+    float _ffVx, _ffVy, _ffOmega;           // computed feedforward outputs
 
-    // Adaptive lookahead parameters
+    // === Adaptive Lookahead ===
     float _adaptLookaheadBaseS;
     float _adaptLookaheadGain;
     float _adaptLookaheadMinS;
     float _adaptLookaheadMaxS;
 
-    // Kalman filter (replaces EMA) — one per axis
+    // === Kalman Filter ===
     KalmanAxis _kalmanX;
     KalmanAxis _kalmanY;
     bool _kalmanInitialized;
 
-    // Predictive braking — physics-based overshoot prevention
-    float _predictiveBrakeDecel;    // assumed deceleration capability (mm/s²)
-    float _predictiveBrakeSafety;   // safety margin factor (>1 = more conservative)
+    // === Predictive Braking ===
+    float _predictiveBrakeDecel;             // assumed deceleration capability (mm/s^2)
+    float _predictiveBrakeSafety;            // safety margin factor
 
-    // Anti-slip / stall detection
-    float _slipCmdThresh;       // min commanded speed to monitor
-    float _slipObsThresh;       // observed speed below this = stalled
-    int   _slipDetectTicks;     // consecutive ticks needed to confirm
-    float _slipBoostFactor;     // multiplicative boost on stall
-    int   _slipBoostMaxTicks;   // max boost duration
-    int   _slipCounter;         // running count of suspect ticks
-    int   _slipBoostRemaining;  // remaining boost ticks
-    bool  _slipDetected;        // flag for telemetry
+    // === Anti-Slip Detection ===
+    float _slipCmdThresh;                   // min commanded speed to monitor slip
+    float _slipObsThresh;                   // observed speed below this = stalled
+    int   _slipDetectTicks;                  // consecutive ticks to confirm stall
+    float _slipBoostFactor;                  // multiplicative boost on stall
+    int   _slipBoostMaxTicks;                // max boost duration
+    int   _slipCounter;                      // running count of suspect ticks
+    int   _slipBoostRemaining;                // remaining boost ticks
+    bool  _slipDetected;                     // flag for telemetry
 
     float _getSpeedMmS(SpeedLevel level) const;
     float _getSpeedDegS(SpeedLevel level) const;

@@ -4,29 +4,21 @@
 #include <Arduino.h>
 #include <esp32_motor.hpp>
 #include <esp32_servo.hpp>
+#include <udp_protocol.hpp>
 
 // ============================================================================
-// Robot Identity — change to "B" when flashing the second robot
+// === Calibration: Speed & Distance Scaling ===
 // ============================================================================
-#define BOT_ID "A"
-
-// ============================================================================
-// Operating Mode
-// ============================================================================
-// #define TEST_MODE // Uncomment to enable test mode (no motors, print commands, blinking LED)
+#define BOT_ID                   "A"       // Robot identity — change to "B" for second robot
 
 #ifndef LED
-#define LED 2 // Default LED pin if not defined elsewhere
+#define LED 2                        // Default LED pin if not defined elsewhere
 #endif
 
-// ============================================================================
-// TUNING PARAMETERS
-// ============================================================================
-// Global scaling factors for physical distances and speeds
-#define SPEED_SCALING_FACTOR     1.0f     // Global multiplier for all movement speeds
-#define ROTATION_SCALING_FACTOR  1.0f     // Specific multiplier for rotational speed
-#define DISTANCE_FACTOR_V        1.0f     // Calibrates dead-reckoning for Vertical (Forward/Backward)
-#define DISTANCE_FACTOR_H        1.25f    // Calibrates dead-reckoning for Horizontal (Strafe)
+#define SPEED_SCALING_FACTOR     1.0f      // Global multiplier for all movement speeds
+#define ROTATION_SCALING_FACTOR  1.0f      // Specific multiplier for rotational speed
+#define DISTANCE_FACTOR_V        1.0f      // Calibrates dead-reckoning for Vertical (Forward/Backward)
+#define DISTANCE_FACTOR_H        1.25f     // Calibrates dead-reckoning for Horizontal (Strafe)
 
 // Measured from PS2 controller physics:
 //   Linear speed at max duty (100): ~72.5 mm/s (7.25 cm/s)
@@ -41,45 +33,30 @@
 #define SPEED_FAST_DEG_S    (86.4f * SPEED_SCALING_FACTOR * ROTATION_SCALING_FACTOR)
 
 // ============================================================================
-// Diagnostics & Safety
+// === Motor Physics ===
 // ============================================================================
 #define ENABLE_DEBUG_LOGGING     1        // Set to 1 to enable detailed serial logs
 #define DRIVE_CLAMP_LOW          65       // Minimum duty to overcome static friction
 #define DRIVE_CLAMP_HIGH         100      // Maximum allowable duty (safety cap)
-
-// Precision Mode — for fine positioning when distance < PRECISION_MODE_THRESH_MM
 #define DRIVE_CLAMP_FINE         65       // Lower duty floor for precision mode (raised from 28 to overcome dead zone)
 #define DRIVE_CLAMP_MINIMAL      25       // Ultra-low floor for single-motor micro-adjustments
-#define PRECISION_MODE_THRESH_MM 50       // Enter precision mode when remaining distance < this
-#define PRECISION_KICKSTART_SUPPRESS true // Disable kickstart in precision mode to prevent wiggle
-
-// Motor mapping constants
 #define MOTOR_MAP_SLOPE          43.0174f
 #define MOTOR_MAP_OFFSET         57.1650f
+#define MOTOR_STOP_THRESHOLD     35       // Below this duty, motors stall
+
+// Kickstart: briefly boost duty to overcome static friction
+#define KICKSTART_FRAMES        3
+#define KICKSTART_SPEED         70.0
+
+// Acceleration ramp
+#define RAMP_DURATION_MS        75      // ms to reach full speed from start
+#define RAMP_START_FRACTION     0.15f   // initial duty fraction (just enough to overcome friction)
 
 // ============================================================================
-// Translation Drift Trim (speed-dependent)
+// === Precision Control ===
 // ============================================================================
-// Counteract the systematic leftward bias of the mecanum physics.
-#define DRIFT_TRIM_SLOW_DEG    9.36f
-#define DRIFT_TRIM_NORMAL_DEG  2.50f
-#define DRIFT_TRIM_FAST_DEG    0.00f
-
-// ============================================================================
-// Latency / Correction Tuning
-// ============================================================================
-#define CAMERA_LATENCY_MS        150      // Default delay compensation for OpenCV/Network
-#define DRIFT_THRESHOLD_MM       5.0f     // apply full correction above this
-#define EMERGENCY_THRESHOLD_MM   25.0f    // decelerate + correct above this
-#define CORRECTION_BLEND_MS      200      // ms to blend corrections smoothly
-
-// ============================================================================
-// Precision & Deceleration
-// ============================================================================
-#define DECCEL_DISTANCE_MM       500.0f   // Start slowing down at this distance (CNC-style long decel)
-#define ROT_DECCEL_DEG           15.0f    // Start slowing down rotation at this angle
-#define MIN_SPEED_LIMIT_MM_S     10.0f    // Floor speed during deccel (prevent stall)
-#define MIN_ROT_LIMIT_DEG_S      5.0f     // Floor rotation during deccel
+#define PRECISION_MODE_THRESH_MM 50       // Enter precision mode when remaining distance < this
+#define PRECISION_KICKSTART_SUPPRESS true // Disable kickstart in precision mode to prevent wiggle
 #define PRECISION_MIN_SPEED_LIMIT_MM_S 14.0f
 #define PRECISION_MIN_ROT_LIMIT_DEG_S  5.0f
 #define CLOSE_APPROACH_DISTANCE_MM     120.0f
@@ -88,17 +65,33 @@
 #define ROTATION_TOLERANCE_DEG   1.5f
 
 // ============================================================================
-// Active Heading Stabilization (Holonomic Control)
+// === Drift Correction ===
 // ============================================================================
-// These constants define how the robot corrects its heading while moving.
-// Increase the gain if the robot is "lazy" about correcting drift.
-// Decrease the gain if the robot "oscillates" or shakes while strafing.
+// Counteract the systematic leftward bias of the mecanum physics.
+#define DRIFT_TRIM_SLOW_DEG    9.36f
+#define DRIFT_TRIM_NORMAL_DEG  2.50f
+#define DRIFT_TRIM_FAST_DEG    0.00f
+
+#define CAMERA_LATENCY_MS        150      // Default delay compensation for OpenCV/Network
+#define DRIFT_THRESHOLD_MM       5.0f     // apply full correction above this
+#define EMERGENCY_THRESHOLD_MM   25.0f    // decelerate + correct above this
+#define CORRECTION_BLEND_MS      200      // ms to blend corrections smoothly
+
+// ============================================================================
+// === Deceleration & Stabilization ===
+// ============================================================================
+#define DECCEL_DISTANCE_MM       500.0f   // Start slowing down at this distance (CNC-style long decel)
+#define ROT_DECCEL_DEG           15.0f    // Start slowing down rotation at this angle
+#define MIN_SPEED_LIMIT_MM_S     10.0f    // Floor speed during deccel (prevent stall)
+#define MIN_ROT_LIMIT_DEG_S      5.0f     // Floor rotation during deccel
 #define STABILIZATION_GAIN       2.5f     // Corrective OMEGA per degree of error
 #define MAX_STABILIZATION_OMEGA  35.0f    // Max deg/s allowed for in-move correction
 
 // ============================================================================
-// Predictive Steering — anticipate drift/momentum using observed velocity
+// === Trajectory Planning ===
 // ============================================================================
+
+// Predictive Steering — anticipate drift/momentum using observed velocity
 // The robot tracks its own velocity from position deltas, predicts where it
 // will be in LOOKAHEAD seconds, and steers toward the target from there.
 // This compensates for momentum/drift before it becomes a large error.
@@ -110,9 +103,7 @@
 #define PREDICTIVE_BRAKE_DECEL_MM_S2   200.0f   // assumed deceleration capability (mm/s²)
 #define PREDICTIVE_BRAKE_SAFETY        1.5f     // safety margin (>1 = start braking earlier)
 
-// ============================================================================
 // S-Curve Trajectory Profile (Jerk-Limited Motion)
-// ============================================================================
 // Instead of instantly commanding full speed, the trajectory generator
 // ramps acceleration smoothly using bounded jerk.  This produces an
 // S-shaped velocity curve that reduces vibration and overshoot.
@@ -121,9 +112,7 @@
 #define SCURVE_MAX_ROT_ACCEL_DEG_S2  180.0f  // max rotational acceleration (deg/s²)
 #define SCURVE_MAX_ROT_JERK_DEG_S3   900.0f  // max rotational jerk (deg/s³)
 
-// ============================================================================
 // Feedforward Compensation
-// ============================================================================
 // Pre-compensate for inertia and friction by injecting extra motor command
 // proportional to desired acceleration and velocity.  Reduces tracking lag.
 #define FEEDFORWARD_KV           0.02f    // velocity feedforward gain (duty per mm/s)
@@ -131,9 +120,7 @@
 #define FEEDFORWARD_KV_ROT       0.01f    // rotational velocity feedforward
 #define FEEDFORWARD_KA_ROT       0.02f    // rotational acceleration feedforward
 
-// ============================================================================
 // Adaptive Lookahead — speed-proportional predictive steering
-// ============================================================================
 // Instead of a fixed lookahead time, scale with current speed.
 // lookahead = BASE + speed * GAIN, clamped to [MIN, MAX]
 #define ADAPTIVE_LOOKAHEAD_BASE_S  0.06f   // base lookahead even at zero speed
@@ -141,18 +128,14 @@
 #define ADAPTIVE_LOOKAHEAD_MIN_S   0.04f   // minimum lookahead (seconds)
 #define ADAPTIVE_LOOKAHEAD_MAX_S   0.18f   // maximum lookahead (seconds)
 
-// ============================================================================
 // Kalman Filter — velocity estimation (replaces EMA)
-// ============================================================================
 // 1D Kalman per axis: state = [position, velocity]
 // Process noise Q and measurement noise R tune responsiveness vs smoothness.
 #define KALMAN_PROCESS_NOISE_POS   0.5f    // position process noise variance
 #define KALMAN_PROCESS_NOISE_VEL   50.0f   // velocity process noise variance
 #define KALMAN_MEASUREMENT_NOISE   2.0f    // position measurement noise variance
 
-// ============================================================================
 // Anti-Slip / Stall Detection
-// ============================================================================
 // If commanded speed > threshold but observed speed < threshold for N ticks,
 // the robot is likely stalled or slipping.  Boost command to break free.
 #define SLIP_CMD_SPEED_THRESH_MM_S  20.0f  // min commanded speed to monitor slip (raised from 15)
@@ -162,15 +145,15 @@
 #define SLIP_BOOST_MAX_TICKS        40     // max ticks to apply boost before giving up
 
 // ============================================================================
-// Timing Constants
+// === Timing ===
 // ============================================================================
 #define STATUS_INTERVAL_MS       100      // telemetry broadcast interval
 #define HELLO_INTERVAL_MS        3000     // auto-discovery interval
 #define PING_INTERVAL_MS         500      // RTT measurement interval
-#define CONTROL_LOOP_INTERVAL_MS 3        // main loop target period (~333 Hz)
+#define CONTROL_LOOP_INTERVAL_MS  3        // main loop target period (~333 Hz)
 
 // ============================================================================
-// Mecanum Kinematics — from PS2 controller physics
+// === Mecanum Kinematics ===
 // ============================================================================
 // Motor layout (top view):
 //   M4(FL) ---- M1(FR)
@@ -185,27 +168,17 @@
 //
 // Convention: V > 0 = forward, H > 0 = right, A > 0 = CW rotation
 
-// Motor stop threshold — below this duty, motors stall
-#define MOTOR_STOP_THRESHOLD    35
-
-// Kickstart: briefly boost duty to overcome static friction
-#define KICKSTART_FRAMES        3
-#define KICKSTART_SPEED         70.0
-#define ROTATION_BRAKE_FRAMES   5
-#define ROTATION_BRAKE_DUTY     75
+// Brake parameters
+#define ROTATION_BRAKE_FRAMES       5
+#define ROTATION_BRAKE_DUTY         75
 #define ROTATION_BRAKE_MIN_OMEGA_DEG_S 5.0f
-
-// Translation active brake: reverse motors briefly to kill physical momentum
-// when the queue commands stop but the robot is still coasting.
-#define TRANSLATION_BRAKE_FRAMES      4       // frames of reverse thrust (~12ms at 333Hz)
-#define TRANSLATION_BRAKE_DUTY        55      // reverse duty (less than rotation — wheels grip better)
+#define TRANSLATION_BRAKE_FRAMES     4       // frames of reverse thrust (~12ms at 333Hz)
+#define TRANSLATION_BRAKE_DUTY      55      // reverse duty (less than rotation — wheels grip better)
 #define TRANSLATION_BRAKE_MIN_SPEED_MM_S 5.0f // only brake if observed speed above this
 
-// Acceleration ramp: gradually increase motor duty at segment start
-// to synchronize wheel engagement and reduce drift from motor timing mismatch.
-// Ramp goes from RAMP_START_FRACTION to 1.0 over RAMP_DURATION_MS.
-#define RAMP_DURATION_MS        75      // ms to reach full speed from start
-#define RAMP_START_FRACTION     0.15f   // initial duty fraction (just enough to overcome friction)
+// ============================================================================
+// === Motor Physics API ===
+// ============================================================================
 
 // speed_to_motor_duty: converts normalized speed [-1,1] to motor duty [-100,100]
 // From PS2 calibration: duty = 43.0174134490 * speed + 57.16498038405947 * sign(speed)
@@ -230,5 +203,35 @@ MecanumSpeeds computeMecanumSpeeds(double V, double H, double A, bool lowSpeedMo
 /// Only one motor is active at a time, producing ~1-2mm steps.
 /// Uses DRIVE_CLAMP_MINIMAL duty floor (18).
 MecanumSpeeds computeSingleMotorSpeeds(double V, double H);
+
+// ============================================================================
+// === Robot Control API ===
+// ============================================================================
+
+/// Apply motor speeds from current motion queue state (~333 Hz loop on Core 1)
+void applyMotors();
+
+/// Process a pre-parsed UDP message (called from Core 0 under mutex)
+void handleParsedMessage(const UdpMessage &msg);
+
+// ============================================================================
+// === Communication API ===
+// ============================================================================
+
+/// Send telemetry status to phone (every STATUS_INTERVAL_MS)
+void sendStatus();
+
+/// Send HELLO beacon for auto-discovery (every HELLO_INTERVAL_MS)
+void sendHello();
+
+/// Send PING for RTT measurement (every PING_INTERVAL_MS)
+void sendPing();
+
+// ============================================================================
+// === Dual-Core API ===
+// ============================================================================
+
+/// Core 0 task: UDP packet processing, command parsing, periodic broadcasts
+void udpTask(void* parameter);
 
 #endif // MAIN_H
