@@ -73,7 +73,7 @@ void executeServoAction(ServoAction action) {
 
         case ServoAction::UPPER_LEFT:
             _servo_action_slider_down();
-            delay(100)
+            delay(100);
             _servo_action_arm_down();
             delay(200); // Wait for arm/slider
             _servo_action_slider_up();
