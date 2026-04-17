@@ -1,5 +1,6 @@
 #include "motion_queue.hpp"
 #include <math.h>
+#include "../Rotation/Rotation.hpp"
 
 // ============================================================================
 // Construction
@@ -75,6 +76,7 @@ void MotionQueue::setPrecisionParameters(float deccel_dist_mm, float rot_deccel_
 }
 
 void MotionQueue::setPredictiveParameters(float lookahead_time_s) {
+    // NOTE: parameter shadows member _lookaheadTimeS — assignment is intentional
     _lookaheadTimeS = lookahead_time_s;
 }
 
@@ -167,6 +169,8 @@ void MotionQueue::_updateVelocityEstimate(float x, float y, float dt_s) {
     }
 
     // Kalman predict step (propagate state forward by dt)
+    // Only called after initialization — predict on uninitialized Kalman
+    // would propagate undefined covariance values from reset()
     _kalmanX.predict(dt_s);
     _kalmanY.predict(dt_s);
 
@@ -296,9 +300,7 @@ bool MotionQueue::enqueueRotate(float target_angle,
     seg.target_y = seg.start_y;
     seg.target_angle = target_angle;
 
-    float d_angle = target_angle - seg.start_angle;
-    while (d_angle > 180.0f) d_angle -= 360.0f;
-    while (d_angle < -180.0f) d_angle += 360.0f;
+    float d_angle = (Rotation(target_angle) - Rotation(seg.start_angle));
 
     seg.distance_mm = (uint16_t)abs(d_angle);
     float rotSpeed = _getSpeedDegS(speed);
@@ -323,6 +325,8 @@ bool MotionQueue::enqueueDuration(MoveDirection direction, uint32_t duration_ms,
                                        SpeedLevel speed, CorrectionPolicy policy,
                                        float currentX, float currentY, float currentAngle) {
     if (_count >= MQ_MAX_SEGMENTS) return false;
+    // Reject zero-duration moves — they complete immediately and waste a queue slot
+    if (duration_ms == 0) return false;
 
     MotionSegment &seg = _segments[_tail % MQ_MAX_SEGMENTS];
     seg.direction       = direction;
@@ -376,6 +380,8 @@ bool MotionQueue::enqueueRotateDuration(RotationDirection direction, uint32_t du
                                         SpeedLevel speed, CorrectionPolicy policy,
                                         float currentX, float currentY, float currentAngle) {
     if (_count >= MQ_MAX_SEGMENTS) return false;
+    // Reject zero-duration moves — they complete immediately and waste a queue slot
+    if (duration_ms == 0) return false;
 
     MotionSegment &seg = _segments[_tail % MQ_MAX_SEGMENTS];
     seg.direction       = MoveDirection::INVALID;
@@ -413,9 +419,8 @@ bool MotionQueue::enqueueRotateDuration(RotationDirection direction, uint32_t du
     float estAngleDelta = seg.omega_deg_s * (duration_ms / 1000.0f);
     seg.target_x = seg.start_x;
     seg.target_y = seg.start_y;
-    seg.target_angle = seg.start_angle + estAngleDelta;
-    while (seg.target_angle >= 360.0f) seg.target_angle -= 360.0f;
-    while (seg.target_angle < 0.0f) seg.target_angle += 360.0f;
+    // Normalize to [0, 360) using Rotation constructor
+    seg.target_angle = Rotation(seg.start_angle + estAngleDelta);
 
     _tail = (_tail + 1) % MQ_MAX_SEGMENTS;
     _count++;
@@ -574,10 +579,9 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
         float speed_scale = 1.0f;
 
         if (isRotationOnly) {
-            float angle_diff = seg.target_angle - current_angle;
-            while (angle_diff > 180.0f) angle_diff -= 360.0f;
-            while (angle_diff < -180.0f) angle_diff += 360.0f;
+            float angle_diff = (Rotation(seg.target_angle) - Rotation(current_angle));
             float abs_diff = fabsf(angle_diff);
+            float rotSign = (angle_diff >= 0.0f) ? 1.0f : -1.0f;
             speed_scale = 1.0f;
 
             if (abs_diff <= _rotToleranceDeg) {
@@ -619,7 +623,6 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             } else {
                 profiledRotSpeed = _scurveRot.update(rawRotSpeed, dt_s);
             }
-            float rotSign = (angle_diff >= 0.0f) ? 1.0f : -1.0f;
             _currentOmega = (abs_diff <= _rotToleranceDeg) ? 0.0f
                 : rotSign * profiledRotSpeed;
             // Feedforward from rotation S-curve acceleration (only during accel phase)
@@ -633,9 +636,7 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             float dx = seg.target_x - current_x;
             float dy = seg.target_y - current_y;
             float dist_remaining = sqrtf(dx * dx + dy * dy);
-            float heading_err = seg.target_angle - current_angle;
-            while (heading_err > 180.0f) heading_err -= 360.0f;
-            while (heading_err < -180.0f) heading_err += 360.0f;
+            float heading_err = (Rotation(seg.target_angle) - Rotation(current_angle));
             float abs_heading_err = fabsf(heading_err);
             float speed_scale = 1.0f;
 
@@ -821,14 +822,20 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
     // Compare commanded speed vs Kalman-observed speed.
     // Only check when NOT in settling band — near the target, low speed is expected.
     bool isTranslation = !(seg.vx_mm_s == 0 && seg.vy_mm_s == 0 && seg.omega_deg_s != 0);
-    float slipDistCheck = isTranslation ? sqrtf(
-        (seg.target_x - current_x) * (seg.target_x - current_x) +
-        (seg.target_y - current_y) * (seg.target_y - current_y)) : 999.0f;
+    // Use squared distance to avoid redundant sqrtf — compare vs squared threshold
+    float slipDistSq = isTranslation
+        ? (seg.target_x - current_x) * (seg.target_x - current_x)
+          + (seg.target_y - current_y) * (seg.target_y - current_y)
+        : 1e6f;
+    float slipDistCheck = sqrtf(slipDistSq);
     if (!seg.isDurationBased && slipDistCheck > _waypointToleranceMm * 4.0f) {
-        float cmdSpeed = sqrtf(_currentVx * _currentVx + _currentVy * _currentVy);
-        float obsSpeed = sqrtf(_estVx * _estVx + _estVy * _estVy);
+        // Compare squared speeds against squared thresholds to avoid sqrtf
+        float cmdSpeedSq = _currentVx * _currentVx + _currentVy * _currentVy;
+        float obsSpeedSq = _estVx * _estVx + _estVy * _estVy;
+        float obsSpeed = sqrtf(obsSpeedSq);
+        float cmdSpeed = sqrtf(cmdSpeedSq);
 
-        if (cmdSpeed > _slipCmdThresh && obsSpeed < _slipObsThresh) {
+        if (cmdSpeedSq > _slipCmdThresh * _slipCmdThresh && obsSpeedSq < _slipObsThresh * _slipObsThresh) {
             _slipCounter++;
         } else {
             _slipCounter = 0;
@@ -861,21 +868,15 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
         done = (seg.elapsed_ms >= seg.duration_ms);
     } else {
         if (seg.vx_mm_s == 0 && seg.vy_mm_s == 0 && seg.omega_deg_s != 0) {
-            float angle_diff = current_angle - seg.target_angle;
-            while (angle_diff > 180.0f) angle_diff -= 360.0f;
-            while (angle_diff < -180.0f) angle_diff += 360.0f;
+            float angle_diff = (Rotation(current_angle) - Rotation(seg.target_angle));
             if (fabsf(angle_diff) <= _rotToleranceDeg) done = true;
         } else {
             float dx = seg.target_x - current_x;
             float dy = seg.target_y - current_y;
             float dist_remaining = sqrtf(dx * dx + dy * dy);
-            
+
             // --- PREDICTIVE COMPLETION CHECK ---
-            // Instead of just checking position tolerance, also predict whether
-            // the robot can stop within the tolerance given its current velocity.
-            float heading_err = seg.target_angle - current_angle;
-            while (heading_err > 180.0f) heading_err -= 360.0f;
-            while (heading_err < -180.0f) heading_err += 360.0f;
+            float heading_err = (Rotation(seg.target_angle) - Rotation(current_angle));
 
             float obsSpd = sqrtf(_estVx * _estVx + _estVy * _estVy);
             
@@ -929,17 +930,13 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
     if (seg.state == SegmentState::HOLDING) {
         bool withinTol = false;
         if (seg.vx_mm_s == 0 && seg.vy_mm_s == 0 && seg.omega_deg_s != 0) {
-            float angle_diff = current_angle - seg.target_angle;
-            while (angle_diff > 180.0f) angle_diff -= 360.0f;
-            while (angle_diff < -180.0f) angle_diff += 360.0f;
+            float angle_diff = (Rotation(current_angle) - Rotation(seg.target_angle));
             withinTol = (fabsf(angle_diff) <= _rotToleranceDeg);
         } else {
             float dx = seg.target_x - current_x;
             float dy = seg.target_y - current_y;
-            float heading_err = seg.target_angle - current_angle;
-            while (heading_err > 180.0f) heading_err -= 360.0f;
-            while (heading_err < -180.0f) heading_err += 360.0f;
-            withinTol = (sqrtf(dx * dx + dy * dy) <= _waypointToleranceMm && 
+            float heading_err = (Rotation(seg.target_angle) - Rotation(current_angle));
+            withinTol = (sqrtf(dx * dx + dy * dy) <= _waypointToleranceMm &&
                          fabsf(heading_err) <= _rotToleranceDeg);
         }
 

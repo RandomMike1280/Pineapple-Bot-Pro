@@ -77,9 +77,12 @@ private:
     float _distFactorV;
 
     // === Position History Ring Buffer (for latency compensation) ===
+    // NOTE: _historyHead and _historyCount are written by Core 1 (update) and
+    // read by Core 0 (getPositionAt).  Protected by _historyMutex.
     PositionSnapshot _history[DR_HISTORY_SIZE];
     uint16_t         _historyHead;   // next write index
     uint16_t         _historyCount;  // entries written (saturates at DR_HISTORY_SIZE)
+    SemaphoreHandle_t _historyMutex;  // protects history buffer from cross-core races
 
     void _recordSnapshot(uint32_t now);
 };

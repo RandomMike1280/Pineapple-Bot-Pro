@@ -9,7 +9,8 @@ DeadReckoning::DeadReckoning()
       _gx(0), _gy(0), _ga(0),
       _ax(0), _ay(0), _aa(0),
       _distFactorH(1.0f), _distFactorV(1.0f),
-      _historyHead(0), _historyCount(0)
+      _historyHead(0), _historyCount(0),
+      _historyMutex(xSemaphoreCreateMutex())
 {
     memset(_history, 0, sizeof(_history));
 }
@@ -45,6 +46,9 @@ void DeadReckoning::update(float vx_mm_s, float vy_mm_s, float omega_deg_s, uint
 }
 
 void DeadReckoning::_recordSnapshot(uint32_t now) {
+    if (_historyMutex != nullptr) {
+        xSemaphoreTake(_historyMutex, portMAX_DELAY);
+    }
     PositionSnapshot &snap = _history[_historyHead];
     snap.timestamp_ms = now;
     snap.ix = _ix;
@@ -53,6 +57,9 @@ void DeadReckoning::_recordSnapshot(uint32_t now) {
 
     _historyHead = (_historyHead + 1) & DR_HISTORY_MASK;
     if (_historyCount < DR_HISTORY_SIZE) _historyCount++;
+    if (_historyMutex != nullptr) {
+        xSemaphoreGive(_historyMutex);
+    }
 }
 
 // ============================================================================
@@ -103,11 +110,17 @@ void DeadReckoning::getOdoPosition(float &out_x, float &out_y, float &out_angle)
 bool DeadReckoning::getPositionAt(uint32_t timestamp_ms, float &out_ix, float &out_iy, float &out_ia) const {
     if (_historyCount == 0) return false;
 
+    if (_historyMutex != nullptr) {
+        xSemaphoreTake(_historyMutex, portMAX_DELAY);
+    }
     uint16_t oldest = (_historyHead - _historyCount) & DR_HISTORY_MASK;
     uint32_t tOldest = _history[oldest].timestamp_ms;
     uint32_t tNewest = _history[(_historyHead - 1) & DR_HISTORY_MASK].timestamp_ms;
 
-    if (timestamp_ms < tOldest || timestamp_ms > tNewest) return false;
+    if (timestamp_ms < tOldest || timestamp_ms > tNewest) {
+        if (_historyMutex != nullptr) xSemaphoreGive(_historyMutex);
+        return false;
+    }
 
     // Binary search
     uint16_t lo = 0;
@@ -134,6 +147,7 @@ bool DeadReckoning::getPositionAt(uint32_t timestamp_ms, float &out_ix, float &o
             out_ix = a.ix + (b.ix - a.ix) * t;
             out_iy = a.iy + (b.iy - a.iy) * t;
             out_ia = Rotation::lerp(a.ia, b.ia, t);
+            if (_historyMutex != nullptr) xSemaphoreGive(_historyMutex);
             return true;
         }
     }
@@ -141,5 +155,6 @@ bool DeadReckoning::getPositionAt(uint32_t timestamp_ms, float &out_ix, float &o
     out_ix = _history[idx].ix;
     out_iy = _history[idx].iy;
     out_ia = _history[idx].ia;
+    if (_historyMutex != nullptr) xSemaphoreGive(_historyMutex);
     return true;
 }

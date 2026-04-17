@@ -63,9 +63,18 @@ void LatencyCompensator::onCameraUpdate(uint32_t phoneTimestamp,
 
     _emergencyTriggered = false;
 
+    // --- Timestamp Validation ---
+    // Guard against overflow/underflow in clock offset arithmetic.
+    // If captureTime would wrap to > ~49.7 days in the future, skip this observation.
+    uint32_t nowMs = millis();
+    if ((int64_t)phoneTimestamp + _clockOffsetMs < 0 ||
+        (int64_t)phoneTimestamp + _clockOffsetMs > (int64_t)nowMs + 60000) {
+        Serial.printf("[LC] Invalid capture time (phone=%lu offset=%lld now=%lu) — skipping\n",
+            (unsigned long)phoneTimestamp, (long long)_clockOffsetMs, (unsigned long)nowMs);
+        return;
+    }
+
     // --- Absolute Time Synchronization ---
-    // The phone sent its absolute timestamp (phoneTimestamp) of the frame capture.
-    // We translate this to our local timeline using the calculated offset.
     uint32_t captureTime = (uint32_t)((int64_t)phoneTimestamp + _clockOffsetMs);
 
     // Step 2: Look up our estimated position at that exact past moment

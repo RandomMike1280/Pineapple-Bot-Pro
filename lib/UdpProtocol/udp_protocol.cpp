@@ -312,12 +312,11 @@ int buildPongMessage(char *buf, int maxLen, uint32_t origTimestamp) {
 }
 
 int buildStatusMessage(char *buf, int maxLen, float x, float y, float angle, int queueLen,
-                       float driftMm, float vx, float vy) {
-  // Because the phone is rotated on it's side while in portrait mode,
-  // The phone's XY coordinate system directly translates to YX on the robot's coordinate system.
-  // We thereby swap and negate X and Y to resolve this conflict.
-  // Velocity is also swapped to match the phone's coordinate system.
-  return snprintf(buf, maxLen, "S:%.1f:%.1f:%.1f:%d:%.1f:%.1f:%.1f", y, x, angle, queueLen, driftMm, vy, vx);
+                       float driftMm) {
+    // Because the phone is rotated on it's side while in portrait mode,
+    // The phone's XY coordinate system directly translates to YX on the robot's coordinate system.
+    // We thereby swap and negate X and Y to resolve this conflict.
+    return snprintf(buf, maxLen, "S:%.1f:%.1f:%.1f:%d:%.1f", y, x, angle, queueLen, driftMm);
 }
 
 int buildRegisterMessage(char *buf, int maxLen, const char *robotId,
