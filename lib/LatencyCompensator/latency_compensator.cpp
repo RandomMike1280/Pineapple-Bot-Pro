@@ -12,7 +12,8 @@ LatencyCompensator::LatencyCompensator()
       _lastDriftX(0), _lastDriftY(0), _lastDriftAngle(0),
       _lastDriftMagnitude(0), _emergencyTriggered(false),
       _driftThresholdMm(20.0f), _emergencyThresholdMm(120.0f),
-      _cameraLatencyMs(0), _clockOffsetMs(0), _offsetInitialized(false)
+      _cameraLatencyMs(0), _clockOffsetMs(0), _offsetInitialized(false),
+      _lastObservedAngle(0), _hasObservedAngle(false)
 {
 }
 
@@ -94,9 +95,12 @@ void LatencyCompensator::onCameraUpdate(uint32_t phoneTimestamp,
     // shortest path difference (only if angle is available)
     if (!isnan(observedAngle)) {
         _lastDriftAngle = Rotation(observedAngle) - Rotation(estAngle);
+        // Store ground-truth angle for App display (report what camera sees)
+        _lastObservedAngle = Rotation::normalize(observedAngle);
+        _hasObservedAngle = true;
         // Telemetry: Compare Ground Truth (Camera) vs Robot's Belief (DR history)
         Serial.printf("[SYNC] Observed (Cam): %.1f | Estimated (DR): %.1f | Error: %.1f\n",
-                      Rotation::normalize(observedAngle), Rotation::normalize(estAngle), _lastDriftAngle);
+                      _lastObservedAngle, Rotation::normalize(estAngle), _lastDriftAngle);
     } else {
         _lastDriftAngle = 0.0f;
         Serial.printf("[SYNC] Observed (Cam): NAN | Estimated (DR): %.1f | Error: 0.0\n",
@@ -105,11 +109,55 @@ void LatencyCompensator::onCameraUpdate(uint32_t phoneTimestamp,
 
     _lastDriftMagnitude = sqrtf(_lastDriftX * _lastDriftX + _lastDriftY * _lastDriftY);
 
-    // Step 4: Re-ground at ALL times (Anchor-Offset model)
-    // We trust the fixed camera as a 100% ground truth. By updating the anchor
-    // instantly, we satisfy: Current = GroundTruth_past + (CurrentOdo - PastOdo)
-    _dr->setAnchor(observedX, observedY, observedAngle, captureTime);
-    
+    // Step 4: Re-ground Kalman state BEFORE setting the dead-reckoning anchor.
+    // When camera position diverges from dead-reckoning by > EMERGENCY_THRESHOLD,
+    // the position jump causes Kalman velocity to flip sign (robot appears to move
+    // backward). By re-grounding Kalman first (zeroing velocity), the motion queue
+    // computes the correct direction toward the target without sign inversions.
+    if (_lastDriftMagnitude > _emergencyThresholdMm) {
+        _mq->regroundPosition(observedX, observedY);
+    }
+
+    // Step 5: Apply anchor offset so dead-reckoning stays in sync with camera.
+    //
+    // Bug fix (2026-04-18): Previously, emergency corrections used setAnchorPositionOnly()
+    // which updated x/y but NOT angle. When angle drifted 130°+, the stabilization
+    // layer saw huge heading_err and commanded max omega, causing erratic behavior.
+    // Now angle is ALWAYS corrected, but with a continuity guard:
+    //
+    //   - If |angle_jump| <= 90°: normal anchor correction (position + angle)
+    //   - If |angle_jump| > 90°: position-only anchor (avoid angle discontinuity)
+    //
+    // The 90° threshold handles the case where the camera reports an extreme angle
+    // that clearly represents a single-frame outlier or wrapping artifact (e.g. DR=0°,
+    // Cam=229°, jump=-129° is actually only -129° mod 360 = see note below).
+    //
+    // NOTE on angle wrapping: Camera angle 229° in a [0,360) system with DR at 0°
+    // should be interpreted as 229° = -131° (mod 360). The Rotation::operator-
+    // already uses shortest-path subtraction, so _lastDriftAngle = Rotation(229) - 0
+    // correctly gives -131°. But when this -131° is fed into stabilization
+    // (heading_err * gain), it produces max omega in the wrong direction.
+    // We now use the continuity guard to detect and suppress these pathological jumps.
+
+    bool hasValidAngle = !isnan(observedAngle);
+    if (hasValidAngle) {
+        // Compute the shortest-path angle correction
+        float angleCorrection = Rotation(observedAngle) - Rotation(estAngle);
+        float absAngleCorrection = fabsf(angleCorrection);
+
+        // If angle jump is pathological (> 90°), apply position-only anchor to
+        // avoid a massive stabilization spike that would destabilize the robot.
+        // Use position-only anchor: fixes x/y drift without disrupting heading.
+        if (absAngleCorrection > 90.0f) {
+            _dr->setAnchorPositionOnly(observedX, observedY, captureTime);
+        } else {
+            _dr->setAnchor(observedX, observedY, observedAngle, captureTime);
+        }
+    } else {
+        // No angle available — correct position only
+        _dr->setAnchorPositionOnly(observedX, observedY, captureTime);
+    }
+
     if (_lastDriftMagnitude > _emergencyThresholdMm) {
         _emergencyTriggered = true;
         Serial.printf("[LC] RE-GROUNDED (EMERGENCY): %.1f mm / %.1f deg\n", _lastDriftMagnitude, _lastDriftAngle);
@@ -169,4 +217,9 @@ float LatencyCompensator::getLastDriftMagnitude() const {
 
 bool LatencyCompensator::wasEmergencyTriggered() const {
     return _emergencyTriggered;
+}
+
+float LatencyCompensator::getLastObservedAngle() const {
+    if (!_hasObservedAngle) return NAN;
+    return _lastObservedAngle;
 }

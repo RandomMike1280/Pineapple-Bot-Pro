@@ -92,6 +92,11 @@ struct KalmanAxis {
         qPos = qp; qVel = qv; rMeas = r;
     }
 
+    void setPosition(float pos) {
+        x = pos;
+        p00 = 1; p01 = 0; p10 = 0; p11 = 1;
+    }
+
     void predict(float dt) {
         // State prediction: x += v*dt
         x += v * dt;
@@ -209,6 +214,11 @@ public:
     /// Set Kalman filter noise parameters
     void setKalmanParameters(float q_pos, float q_vel, float r_meas);
 
+    /// Re-ground Kalman position from camera observation (call BEFORE applying
+    /// EMERGENCY corrections). This prevents velocity sign inversions when
+    /// camera corrects position in the opposite direction of dead-reckoning.
+    void regroundPosition(float cam_x, float cam_y);
+
     /// Get the feedforward compensation values (for motor layer)
     void getFeedforward(float &ff_vx, float &ff_vy, float &ff_omega) const;
 
@@ -268,7 +278,9 @@ public:
     /// Called every control-loop tick.  Returns true if there is an active
     /// segment being executed.
     /// @param dt_ms elapsed time since last call
-    bool tick(uint32_t dt_ms, float current_x, float current_y, float current_angle);
+    /// @param groundTruthAngle camera-observed angle (used for stabilization, optional)
+    bool tick(uint32_t dt_ms, float current_x, float current_y, float current_angle,
+              float groundTruthAngle = NAN, bool hasGroundTruth = false);
 
     /// Get the current motion velocity to apply to motors.
     /// Returns (0, 0, 0) if no segment is active.

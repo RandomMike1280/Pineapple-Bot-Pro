@@ -148,14 +148,15 @@ MecanumSpeeds computeMecanumSpeeds(double V, double H, double A, bool lowSpeedMo
     applyDutyNormalization(mspeedf);
 
     if (precisionMode) {
-        // Precision mode: use lower duty floor to enable very fine movements.
-        // On the FIRST frame of precision mode, apply a brief kick to break static friction.
-        // Without this, duty=65 at 7cm is right at the edge of what starts the motors,
-        // causing them to stall and struggle. The boost is brief (1 frame) so it doesn't
-        // cause overshoot at such short distances.
-        static bool prevPrecisionMode = false;
-        bool firstFrameOfPrecision = precisionMode && !prevPrecisionMode;
-        prevPrecisionMode = precisionMode;
+        // Precision mode: use lower duty floor for very fine movements.
+        // Use induction kickstart: if commanded speed > 0 but observed speed ≈ 0,
+        // the motors are stalled — give a brief boost to break static friction.
+        // If observed speed > 0, motors are already moving and don't need a boost.
+        float estVx, estVy;
+        motionQueue.getEstimatedVelocity(estVx, estVy);
+        float estSpeed = sqrtf(estVx * estVx + estVy * estVy);
+        float cmdSpeed = sqrtf(V * V + H * H);
+        bool motorsStalled = (cmdSpeed > 0.05f && estSpeed < 1.5f);
 
         for (int i = 0; i < 4; i++) {
             double absSpeed = abs(mspeedf[i]);
@@ -164,12 +165,12 @@ MecanumSpeeds computeMecanumSpeeds(double V, double H, double A, bool lowSpeedMo
             }
         }
 
-        // First frame: brief boost above floor to break static friction
-        if (firstFrameOfPrecision) {
+        // Induction kickstart: boost only when motors are actually stalled
+        if (motorsStalled) {
             for (int i = 0; i < 4; i++) {
                 if (abs(mspeedf[i]) > 0) {
                     double absSpeed = abs(mspeedf[i]);
-                    double kickPower = DRIVE_CLAMP_FINE + 15; // ~80 total — enough to start, not enough to overshoot
+                    double kickPower = DRIVE_CLAMP_FINE + 15;
                     mspeedf[i] = sign(mspeedf[i]) * max(kickPower, absSpeed);
                 }
             }
@@ -200,6 +201,24 @@ MecanumSpeeds computeMecanumSpeeds(double V, double H, double A, bool lowSpeedMo
                 mspeedf[i] = sign(mspeedf[i]) * max(kickPower, absSpeed);
             } else if (absSpeed > 0) {
                 mspeedf[i] = sign(mspeedf[i]) * max((double)DRIVE_CLAMP_LOW, absSpeed);
+            }
+        }
+    }
+
+    // Motor balance: compensate for right-side motors consistently producing
+    // more torque than left-side motors. M2 (BR) and M3 (BL) are right-side,
+    // M1 (FR) and M4 (FL) are left-side. Apply a small left-side boost.
+    const float BALANCE_RIGHT_BOOST = 3.0f;  // extra duty for right side to equalize
+    for (int i = 0; i < 4; i++) {
+        if (mspeedf[i] > 0) {
+            if (i == 1 || i == 2) {
+                mspeedf[i] -= BALANCE_RIGHT_BOOST;
+                if (mspeedf[i] < DRIVE_CLAMP_LOW * 0.5f) mspeedf[i] = DRIVE_CLAMP_LOW * 0.5f;
+            }
+        } else if (mspeedf[i] < 0) {
+            if (i == 1 || i == 2) {
+                mspeedf[i] += BALANCE_RIGHT_BOOST;
+                if (mspeedf[i] > -DRIVE_CLAMP_LOW * 0.5f) mspeedf[i] = -DRIVE_CLAMP_LOW * 0.5f;
             }
         }
     }
@@ -530,11 +549,37 @@ void applyMotors() {
             return;
         }
 
+        // If we have a segment that's still active and ramp isn't finished, keep ramping.
+        // This handles the case where _currentVx == 0 due to Kalman deadzone but the
+        // motion queue still intends to move (e.g. short distance moves near target).
+        if (seg && seg->state == SegmentState::ACTIVE && motorRampFactor < 1.0f) {
+            if (!motorWasMoving) {
+                motorRampFactor = RAMP_START_FRACTION;
+                motorWasMoving = true;
+                rearmKickstart();
+            } else {
+                motorRampFactor += rampIncrement;
+                if (motorRampFactor > 1.0f) motorRampFactor = 1.0f;
+            }
+            // Suppress brakes during ongoing segment ramp-up
+            rotationBrakeFrames = 0;
+            rotationBrakeDirection = 0;
+            translationBrakeFrames = 0;
+            suppressRotationBrake = true;
+            motionIdleStartTime = 0;
+            return;
+        }
+
 #ifndef TEST_MODE
-        Motor1.Stop();
-        Motor2.Stop();
-        Motor3.Stop();
-        Motor4.Stop();
+        // Only stop motors when ramp is fully complete (not during startup acceleration).
+        // When ramping up, _currentVx may be 0 momentarily while the motion queue
+        // is still commanding movement — stopping motors here would kill the startup.
+        if (motorRampFactor >= 1.0f) {
+            Motor1.Stop();
+            Motor2.Stop();
+            Motor3.Stop();
+            Motor4.Stop();
+        }
 #endif
 
         if (millis() - motionIdleStartTime > 50) {
@@ -567,6 +612,27 @@ void applyMotors() {
     getCurrentPose(cx, cy, c_angle);
     double V, H, A;
     computeHeadingVelocities(vx, vy, omega, c_angle, seg, V, H, A);
+
+    // #region agent_debug_log
+    // Trace omega from motionQueue through to motor duty — verify stabilization is working
+    {
+        static unsigned long lastDebugTime = 0;
+        if (millis() - lastDebugTime >= 100) {
+            float heading_err = 0;
+            float dist_rem = 0;
+            if (seg && seg->state == SegmentState::ACTIVE) {
+                heading_err = (Rotation(seg->target_angle) - Rotation(c_angle));
+                float dx = seg->target_x - cx;
+                float dy = seg->target_y - cy;
+                dist_rem = sqrtf(dx*dx + dy*dy);
+            }
+            float gtAngle = latencyComp.getLastObservedAngle();
+            logger.update("STAB", "err=%.1f omega=%.1f A=%.3f dist=%.1f V=%.2f H=%.2f gt=%.1f",
+                heading_err, omega, A, dist_rem, V, H, isnan(gtAngle) ? 0.0f : gtAngle);
+            lastDebugTime = millis();
+        }
+    }
+    // #endregion
 
     // --- Detect operating mode ---
     float cmdMag = sqrtf(vx * vx + vy * vy);
@@ -806,6 +872,10 @@ void handleParsedMessage(const UdpMessage &msg) {
 void sendStatus() {
     float x, y, angle;
     deadReckoning.getCurrentPosition(x, y, angle);
+    // Prefer camera ground-truth angle over dead-reckoning for App display.
+    // Dead-reckoning drifts over time; camera angle is the authoritative truth.
+    float gtAngle = latencyComp.getLastObservedAngle();
+    if (!isnan(gtAngle)) angle = gtAngle;
 
     char buf[80];
     int len = buildStatusMessage(buf, sizeof(buf),
@@ -992,6 +1062,9 @@ void udpTask(void* parameter) {
             xSemaphoreTake(stateMutex, portMAX_DELAY);
             int qRemaining = motionQueue.remaining();
             float driftMag = latencyComp.getLastDriftMagnitude();
+            // Prefer camera ground-truth angle for App display
+            float gtAngle = latencyComp.getLastObservedAngle();
+            if (!isnan(gtAngle)) angle = gtAngle;
             xSemaphoreGive(stateMutex);
 
             char buf[80];
@@ -1045,9 +1118,14 @@ void loop() {
     xSemaphoreTake(stateMutex, portMAX_DELAY);
 
     // ---- Tick the motion queue ----
+    // Use camera ground-truth angle for stabilization when available.
+    // The dead-reckoning angle drifts; stabilization must use the authoritative
+    // camera angle to correctly compute heading error during translation moves.
     float current_x, current_y, current_angle;
     deadReckoning.getCurrentPosition(current_x, current_y, current_angle);
-    bool moving = motionQueue.tick(dt, current_x, current_y, current_angle);
+    float gtAngle = latencyComp.getLastObservedAngle();
+    bool hasGt = !isnan(gtAngle);
+    bool moving = motionQueue.tick(dt, current_x, current_y, current_angle, gtAngle, hasGt);
 
     ServoAction actionToExecute = ServoAction::NONE;
     if (motionQueue.segmentJustCompleted) {

@@ -56,6 +56,10 @@ public:
     /// Get the pure odometer position
     void getOdoPosition(float &out_x, float &out_y, float &out_angle) const;
 
+    /// Set position anchor only (angle unchanged). Used to correct position drift
+    /// without disrupting the robot's heading, which would cause orbit at close range.
+    void setAnchorPositionOnly(float worldX, float worldY, uint32_t captureTime);
+
 private:
     // === Odometer (continuous integration) ===
     float    _ix;

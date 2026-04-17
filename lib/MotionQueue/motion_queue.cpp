@@ -106,6 +106,15 @@ void MotionQueue::setKalmanParameters(float q_pos, float q_vel, float r_meas) {
     _kalmanY.qPos = q_pos; _kalmanY.qVel = q_vel; _kalmanY.rMeas = r_meas;
 }
 
+void MotionQueue::regroundPosition(float cam_x, float cam_y) {
+    _kalmanX.setPosition(cam_x);
+    _kalmanY.setPosition(cam_y);
+    _estVx = 0.0f;
+    _estVy = 0.0f;
+    _prevPoseX = cam_x;
+    _prevPoseY = cam_y;
+}
+
 void MotionQueue::setPredictiveBraking(float decel_mm_s2, float safety_factor) {
     _predictiveBrakeDecel = decel_mm_s2;
     _predictiveBrakeSafety = safety_factor;
@@ -525,7 +534,8 @@ bool MotionQueue::enqueue(MoveDirection direction, uint16_t distance_mm,
 // Tick — called every control-loop iteration
 // ============================================================================
 
-bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float current_angle) {
+bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float current_angle,
+                       float groundTruthAngle, bool hasGroundTruth) {
     segmentJustCompleted = false;
     _tickTimeMs += dt_ms;
     float dt_s = dt_ms / 1000.0f;
@@ -636,7 +646,13 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             float dx = seg.target_x - current_x;
             float dy = seg.target_y - current_y;
             float dist_remaining = sqrtf(dx * dx + dy * dy);
-            float heading_err = (Rotation(seg.target_angle) - Rotation(current_angle));
+            // Use camera ground truth for stabilization when available.
+            // Dead-reckoning angle drifts; stabilization must compare against the
+            // authoritative world-frame angle to avoid oscillation (DR keeps jumping
+            // toward camera, then stabilization sees ~0 error, then camera corrects
+            // again, etc.).
+            float angleForStab = hasGroundTruth ? groundTruthAngle : current_angle;
+            float heading_err = (Rotation(seg.target_angle) - Rotation(angleForStab));
             float abs_heading_err = fabsf(heading_err);
             float speed_scale = 1.0f;
 
@@ -828,7 +844,11 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
           + (seg.target_y - current_y) * (seg.target_y - current_y)
         : 1e6f;
     float slipDistCheck = sqrtf(slipDistSq);
-    if (!seg.isDurationBased && slipDistCheck > _waypointToleranceMm * 4.0f) {
+    // Disable slip detection when very close to target (< 5× tolerance).
+    // At close range, low commanded speed naturally produces low observed speed,
+    // which triggers false-positive slip detection and corrupts the velocity estimate.
+    bool nearTarget = slipDistCheck < _waypointToleranceMm * 5.0f;
+    if (!nearTarget && !seg.isDurationBased && slipDistCheck > _waypointToleranceMm * 4.0f) {
         // Compare squared speeds against squared thresholds to avoid sqrtf
         float cmdSpeedSq = _currentVx * _currentVx + _currentVy * _currentVy;
         float obsSpeedSq = _estVx * _estVx + _estVy * _estVy;

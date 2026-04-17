@@ -88,6 +88,23 @@ void DeadReckoning::setAnchor(float worldX, float worldY, float worldAngle, uint
     }
 }
 
+void DeadReckoning::setAnchorPositionOnly(float worldX, float worldY, uint32_t captureTime) {
+    float odoX, odoY, odoA;
+    if (getPositionAt(captureTime, odoX, odoY, odoA)) {
+        // Only update position anchor; preserve angle anchor
+        _gx = worldX;
+        _gy = worldY;
+        _ax = odoX;
+        _ay = odoY;
+        // _ga and _aa unchanged — angle stays the same
+    } else {
+        _gx = worldX;
+        _gy = worldY;
+        _ax = _ix;
+        _ay = _iy;
+    }
+}
+
 void DeadReckoning::getCurrentPosition(float &out_x, float &out_y, float &out_angle) const {
     // Current = Anchor + (CurrentOdo - OdoAtAnchor)
     out_x = _gx + (_ix - _ax);

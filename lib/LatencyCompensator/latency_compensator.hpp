@@ -44,6 +44,10 @@ public:
     /// Check if an emergency correction was triggered on the last update
     bool wasEmergencyTriggered() const;
 
+    /// Get the last camera-observed ground truth angle in degrees.
+    /// Returns NAN if no camera observation has been received yet.
+    float getLastObservedAngle() const;
+
     /// Set drift thresholds
     void setThresholds(float driftThresholdMm, float emergencyThresholdMm);
 
@@ -65,6 +69,10 @@ private:
     float _lastDriftAngle;
     float _lastDriftMagnitude;
     bool  _emergencyTriggered;
+
+    // Ground-truth angle observed from camera (for phone App display)
+    float _lastObservedAngle;
+    bool  _hasObservedAngle;
 
     // Thresholds
     float _driftThresholdMm;

@@ -14,12 +14,12 @@ The robot is remote-controlled via a custom UDP protocol using short ASCII strin
 
 **Key Commands:**
 - `M` / `D`: Move / Move Duration in a specific direction (Supports optional `[:<action>]` servo parameter).
-- `W`: Waypoint navigation to absolute coordinates `(x, y)` (Supports optional `[:<action>]` servo parameter).
+- `W`: Waypoint navigation to absolute coordinates `(x, y)` (Supports optional `[:<action>]` servo parameter. Repeated commands within a 15mm tolerance of the active target are deduplicated).
 - `T` / `O`: Rotate to target angle / Rotate for duration.
 - `V`: Direct velocity control (`vx`, `vy`, `omega`) with a timeout.
 - `C`: Camera position updates from the phone.
 - `P` / `Q`: Ping / Pong for measuring network RTT and clock synchronization.
-- `E`: Execute standalone Servo Action (`grabber`, `slider`, `arm` configurations).
+- `E`: Execute standalone Servo Action (Supports complex sequencing like `LOWER_LEFT`, `LOWER_RIGHT`, `UPPER_LEFT`, `UPPER_RIGHT`, and discrete primitives like `GRABBER_LEFT`, `SLIDER_UP`, `ARM_DOWN`, etc.).
 - `U`: Set Serial Monitor (`U:<0|1>`). Opt-in to stream debug logs back to the phone.
 - `X`: Mission sequence DONE signal. Triggers visual 4-blink LED feedback on the robot.
 - `A`: Immediate emergency stop (ABORT).
@@ -37,9 +37,9 @@ The robot employs a four-wheel Mecanum drive.
 - **Dead-Zone Compensation:** The ESP32's PWM duties are scaled linearly against calibrated ranges (`duty = v * 43.017 + 57.165`) to bypass hardware dead-zones. Absolute theoretical speed limits trace up to `72.5 mm/s` (Fast), `43.5 mm/s` (Normal), and `29 mm/s` (Slow).
 - **Kickstart:** To overcome static friction, an immediate power boost (duty `70`) is applied across `3` frames (~9ms) whenever a motor abruptly breaks static hold.
 - **Precision Modes:** 
-  - *Low-Speed Mode:* For speeds `< 10 mm/s`, kickstart is disabled and absolute duty floor is utilized to prevent wiggling.
-  - *Precision Mode:* When `< 50mm` from a target coordinate, the robot transitions to a finer duty floor and disables kickstart to prepare for sub-millimeter positioning.
-  - *Single-Motor Mode (Micro-steps):* When `< 15mm` from a target coordinate, only the single most optimal wheel is fired at minimum duty. This allows extreme micro-adjustments (~1-2mm) without overshooting.
+  - *Low-Speed Mode:* For speeds `< 10 mm/s`, kickstart is disabled and a lower absolute duty floor is utilized to prevent wiggling and allow smooth crawling.
+  - *Precision Mode:* When `< 50mm` from a target coordinate, the robot transitions to a finer duty floor. Instead of completely disabling kickstart, it utilizes a dynamic "induction kickstart" which applies a brief power boost only if motor stall is detected (observed speed ≈ 0 while commanded speed > 0.05), ensuring reliable sub-millimeter positioning without unnecessary oscillation.
+  - *Single-Motor Mode (Micro-steps):* When `< 15mm` from a target coordinate, only the single most optimally aligned wheel is fired at minimum duty to produce the smallest physical displacement. For ultra-short adjustments (`< 8mm`), the power floor is further restricted to the minimal reliable start threshold, enabling extreme micro-adjustments (~1-2mm) without overshooting.
 - **Anti-Slip / Stall Detection:** If the observed velocity falls below `5 mm/s` while the commanded speed remains over `20 mm/s` for 25 control ticks (~75ms), the firmware detects a stall/slip. It applies an immediate `1.35x` multiplicative power boost (up to 40 ticks) to break free from the obstacle or friction trap.
 - **Drift Trim:** The translation outputs are pre-rotated slightly depending on speed to compensate for systematic hardware skew.
 

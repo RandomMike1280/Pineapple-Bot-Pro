@@ -50,7 +50,7 @@
 
 // Acceleration ramp
 #define RAMP_DURATION_MS        75      // ms to reach full speed from start
-#define RAMP_START_FRACTION     0.40f   // initial duty fraction (just enough to overcome friction)
+#define RAMP_START_FRACTION     0.15f   // initial duty fraction (just enough to overcome friction)
 
 // ============================================================================
 // === Precision Control ===
@@ -58,7 +58,7 @@
 #define PRECISION_MODE_THRESH_MM 50       // Enter precision mode when remaining distance < this
 #define WAYPOINT_SAME_TARGET_TOL_MM 15.0f  // Threshold for "same target" deduplication
 #define PRECISION_KICKSTART_SUPPRESS true // Disable kickstart in precision mode to prevent wiggle
-#define PRECISION_MIN_SPEED_LIMIT_MM_S 30.0f
+#define PRECISION_MIN_SPEED_LIMIT_MM_S 18.0f
 #define PRECISION_MIN_ROT_LIMIT_DEG_S  5.0f
 #define CLOSE_APPROACH_DISTANCE_MM     120.0f
 #define CLOSE_ROT_APPROACH_DEG         8.0f
