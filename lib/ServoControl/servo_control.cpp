@@ -73,19 +73,20 @@ void executeServoAction(ServoAction action) {
 
         case ServoAction::UPPER_LEFT:
             _servo_action_slider_down();
+            delay(100)
             _servo_action_arm_down();
-            delay(350); // Wait for arm/slider
+            delay(200); // Wait for arm/slider
             _servo_action_slider_up();
             _servo_action_arm_up();
-            delay(50);
+            delay(50);      
             break;
 
         case ServoAction::UPPER_RIGHT:
             _servo_action_slider_up();
             _servo_action_arm_down();
-            delay(300); // Wait for arm/slider
+            delay(50); // Wait for arm/slider
             _servo_action_arm_up();
-            delay(100); // Return
+            delay(50); // Return
             break;
 
         case ServoAction::GRABBER_LEFT:
