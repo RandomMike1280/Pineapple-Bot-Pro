@@ -211,7 +211,7 @@ MecanumSpeeds computeMecanumSpeeds(double V, double H, double A, bool lowSpeedMo
     // (not left-side boost) so that when speed-to-duty maps the same command,
     // right motors get slightly less PWM duty to equalize torque output.
     // (Bug fix: previous code boosted right and reduced left, which was backwards.)
-    const float BALANCE_RIGHT_REDUCE = 3.0f;  // extra reduction for right side to equalize
+    const float BALANCE_RIGHT_REDUCE = 1.5f;  // reduced from 3.0 — was overcorrecting (Ravg went to 0 while Lavg was 70)
     for (int i = 0; i < 4; i++) {
         if (mspeedf[i] > 0) {
             if (i == 1 || i == 2) {

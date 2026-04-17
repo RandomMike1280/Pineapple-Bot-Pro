@@ -70,7 +70,7 @@
 // ============================================================================
 // Counteract the systematic leftward bias of the mecanum physics.
 #define DRIFT_TRIM_SLOW_DEG    9.36f
-#define DRIFT_TRIM_NORMAL_DEG  2.50f
+#define DRIFT_TRIM_NORMAL_DEG  0.00f   // disabled — was rotating aim vector and hurting straight-line tracking
 #define DRIFT_TRIM_FAST_DEG    0.00f
 
 #define CAMERA_LATENCY_MS        150      // Default delay compensation for OpenCV/Network

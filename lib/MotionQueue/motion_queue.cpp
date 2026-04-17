@@ -646,13 +646,17 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             float dx = seg.target_x - current_x;
             float dy = seg.target_y - current_y;
             float dist_remaining = sqrtf(dx * dx + dy * dy);
-            // Use camera ground truth for stabilization when available.
-            // Dead-reckoning angle drifts; stabilization must compare against the
-            // authoritative world-frame angle to avoid oscillation (DR keeps jumping
-            // toward camera, then stabilization sees ~0 error, then camera corrects
-            // again, etc.).
-            float angleForStab = hasGroundTruth ? groundTruthAngle : current_angle;
-            float heading_err = (Rotation(seg.target_angle) - Rotation(angleForStab));
+            // Use DR angle for ALL internal stabilization — NOT camera angle.
+            //
+            // PROBLEM with camera angle: camera angle has ~100° jumps every SYNC
+            // (DR=246°, Cam=1°, Error=115°). When stabilization uses camera angle,
+            // it creates a feedback loop: camera jumps, stabilization sees error,
+            // applies correction, robot moves, camera jumps again, repeat.
+            //
+            // Camera angle is only for external App display (sent via telemetry).
+            // All internal control (stabilization, heading error) must use DR angle,
+            // which changes smoothly without jumps.
+            float heading_err = (Rotation(seg.target_angle) - Rotation(current_angle));
             float abs_heading_err = fabsf(heading_err);
             float speed_scale = 1.0f;
 
@@ -663,18 +667,14 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             if (dist_remaining <= _waypointToleranceMm) {
                 speed_scale = 0.0f;
             } else if (inSettlingBand) {
-                // Inside settling band: linear ramp toward zero with a minimum
-                // floor so the motors always have enough torque to actually move.
-                // Without the floor, the robot stalls a few mm from the target
-                // and requires a manual nudge to reach tolerance.
+                // Inside settling band: linear ramp toward zero.
+                // NO precision floor here — the linear ramp naturally drives speed to 0.
+                // The floor was keeping speed at 18mm/s even 6mm from target,
+                // causing overshoot and the settle-overshoot-adjust oscillation.
                 float settleNorm = (dist_remaining - _waypointToleranceMm)
                                  / (settlingDist - _waypointToleranceMm);
                 speed_scale = settleNorm * 0.5f;
-                // Floor: precision min speed keeps motors turning (especially for strafe)
-                if (seg.speed_mm_s > 0.001f) {
-                    float settleFloor = _precisionMinSpeedLimitMmS / seg.speed_mm_s;
-                    if (speed_scale < settleFloor) speed_scale = settleFloor;
-                }
+                // Floor removed: settling band handles final approach without boost.
             } else {
                 if (_deccelDistMm > 0.001f && dist_remaining < _deccelDistMm) {
                     float normalized = dist_remaining / _deccelDistMm;
