@@ -12,7 +12,7 @@
 //   HELLO     H:<robot_id>
 //   MOVE      M:<dir>:<dist_mm>:<speed>:<policy>
 //   MOVE_DUR  D:<dir>:<duration_ms>:<speed>:<policy>
-//   WAYPOINT  W:<target_x>:<target_y>[:<angle>]:<speed>:<policy>[:<servo_action>]
+//   WAYPOINT  W:<x>:<y>[:<angle>]:<speed>:<policy>[:<servo_action>[:<hash>]]
 //   ROTATE    T:<target_angle_deg>:<speed>:<policy>
 //   ROT_DUR   O:<cw|ccw>:<duration_ms>:<speed>:<policy>
 //   CAM       C:<timestamp_ms>:<x_mm>:<y_mm>[:<angle_deg>]
@@ -22,6 +22,7 @@
 //   VELOCITY  V:<vx_mm_s>:<vy_mm_s>:<omega_deg_s>:<timeout_ms>
 //   ABORT     A
 //   REGISTER  R:<robot_id>:<caps>
+//   ARRIVED   K:<waypoint_hash>  — robot → phone: reached current waypoint
 // ============================================================================
 
 enum class MsgType : uint8_t {
@@ -42,6 +43,7 @@ enum class MsgType : uint8_t {
     SERIAL_LOG,
     DONE,
     SERVO_EXEC,
+    ARRIVED,
     UNKNOWN
 };
 
@@ -129,6 +131,9 @@ struct UdpMessage {
     // REGISTER fields
     char robot_id[8];
 
+    // WAYPOINT fields
+    char waypointHash[16];  // unique hash for arrival notification (e.g. "a3f9c2e1")
+
     // SERVO fields
     ServoAction   servoAction;
 };
@@ -160,6 +165,9 @@ int buildRegisterMessage(char* buf, int maxLen,
 /// Type: S=Static, U=Update-in-place, I=Important (Red)
 int buildLogMessage(char* buf, int maxLen,
                     char type, const char* logId, const char* msg);
+
+/// Build an ARRIVED message: "K:<waypoint_hash>"
+int buildArrivedMessage(char* buf, int maxLen, const char* waypointHash);
 
 // --- Helpers ---
 MoveDirection   parseDirection(const char* str);

@@ -50,6 +50,17 @@ uint32_t lastPingTime   = 0;
 static int doneFeedbackBlinks = 0;
 static uint32_t lastFeedbackToggleTime = 0;
 
+// Internal waypoint arrival: robot tracks the last hash it notified the phone about
+// to avoid re-sending for the same waypoint (e.g. if phone retries after a dropped ACK).
+static char lastNotifiedHash[16] = {0};
+static uint32_t lastArrivedNotifyTime = 0;
+static const uint32_t ARRIVED_SPAM_INTERVAL_MS = 250;  // re-send every 250ms until hash changes
+
+// Shared flag from Core 1 → Core 0: triggers an ARRIVED notification on next Core 0 cycle.
+// Core 1 sets this when a waypoint segment completes. Core 0 clears it after sending.
+static volatile bool pendingArrivedNotification = false;
+static char pendingArrivedHash[16] = {0};
+
 // ============================================================================
 // Dual-core synchronization
 // ============================================================================
@@ -59,6 +70,7 @@ volatile bool     abortFlag = false;         // set by Core 0, read by Core 1 fo
 // Forward declarations for dual-core
 void udpTask(void* parameter);
 void handleParsedMessage(const UdpMessage &msg);
+void sendArrivedNotification(const char* waypointHash);  // Core 0 — sends "K:<hash>" to phone
 
 // ============================================================================
 // Current motor velocities (for dead-reckoning integration)
@@ -640,6 +652,24 @@ void applyMotors() {
     double V, H, A;
     computeHeadingVelocities(vx, vy, omega, c_angle, seg, V, H, A);
 
+    // --- Abnormal-rotation guard near waypoints ---
+    // The stabilizer (omega from motionQueue) corrects heading drift during TRANSLATION.
+    // But when the robot is in a pure rotation phase (no translation commanded), or when
+    // it is very close to the waypoint (cmdMag near zero), the stabilizer can fight the
+    // intended rotation, causing oscillating spin near the target.  We detect this by
+    // checking if there is significant commanded rotation AND minimal translation.
+    // In that case we zero the stabilization omega and let the robot rotate freely.
+    {
+        float cmdMag = sqrtf(vx * vx + vy * vy);
+        bool isPureRotation = (cmdMag < 0.1f && fabsf(omega) > 0.1f);
+        bool isNearTarget   = (cmdMag < 0.01f);  // extremely slow — suppress all omega
+        if (isPureRotation || isNearTarget) {
+            A = 0;
+            V = 0;
+            H = 0;
+        }
+    }
+
     // #region agent_debug_log
     // Trace omega from motionQueue through to motor duty — verify stabilization is working
     {
@@ -662,13 +692,14 @@ void applyMotors() {
     // #endregion
 
     // --- Detect operating mode ---
-    float cmdMag = sqrtf(vx * vx + vy * vy);
-    bool lowSpeedMode = (cmdMag > 0.001f && cmdMag < 10.0f);
+    float cmdMagDetect = sqrtf(vx * vx + vy * vy);
     bool precisionMode = false;
     bool singleMotorMode = false;
-    detectOperatingMode(seg, cmdMag, cx, cy, precisionMode, singleMotorMode);
+    detectOperatingMode(seg, cmdMagDetect, cx, cy, precisionMode, singleMotorMode);
 
     // --- Compute motor duties ---
+    float cmdMag = sqrtf(vx * vx + vy * vy);
+    bool lowSpeedMode = (cmdMag > 0.001f && cmdMag < 10.0f);
     MecanumSpeeds s;
     if (singleMotorMode) {
         s = computeSingleMotorSpeeds(V, H);
@@ -785,16 +816,20 @@ void handleParsedMessage(const UdpMessage &msg) {
                 bool ok = motionQueue.enqueueWaypoint(
                     msg.target_x, msg.target_y, msg.target_angle,
                     msg.speed, msg.correctionPolicy, msg.servoAction,
-                    cx, cy, c_angle
+                    cx, cy, c_angle,
+                    msg.waypointHash
                 );
                 if (ok) {
-                    logger.log("[CMD] WAYPOINT: (%.1f, %.1f) @ %.1f°",
-                        msg.target_x, msg.target_y, msg.target_angle);
+                    logger.log("[CMD] WAYPOINT: (%.1f, %.1f) @ %.1f deg hash=[%s]",
+                        msg.target_x, msg.target_y, msg.target_angle,
+                        strlen(msg.waypointHash) > 0 ? msg.waypointHash : "none");
                 } else {
                     logger.important("[ERR] WAYPOINT rejected!");
                 }
             } else {
-                logger.log("[CMD] WAYPOINT (same target) - continuing");
+                // Same target: update the hash on the current active segment
+                motionQueue.setCurrentWaypointHash(msg.waypointHash);
+                logger.log("[CMD] WAYPOINT (same target) hash=[%s]", msg.waypointHash);
             }
             break;
         }
@@ -933,6 +968,30 @@ void sendPing() {
     udp.beginPacket(phoneIP, udpPort);
     udp.write((uint8_t*)buf, len);
     udp.endPacket();
+}
+
+// ============================================================================
+// Send ARRIVED notification to phone (robot-internal waypoint arrival)
+// ============================================================================
+// The robot detects arrival internally using dead-reckoning. This eliminates
+// phone-side latency and "guessing" from stale telemetry. Because UDP packets
+// can be lost, we spam the notification every ARRIVED_SPAM_INTERVAL_MS until
+// the hash changes, using a unique waypoint hash to identify the target.
+// Called from Core 0 under mutex.
+void sendArrivedNotification(const char* waypointHash) {
+    if (waypointHash == nullptr || waypointHash[0] == '\0') return;
+
+    uint32_t now = millis();
+    if (now - lastArrivedNotifyTime < ARRIVED_SPAM_INTERVAL_MS) return;
+
+    char buf[32];
+    int len = buildArrivedMessage(buf, sizeof(buf), waypointHash);
+    udp.beginPacket(phoneIP, udpPort);
+    udp.write((uint8_t*)buf, len);
+    udp.endPacket();
+
+    lastArrivedNotifyTime = now;
+    logger.log("[ARRIVED] K:%s", waypointHash);
 }
 
 // ============================================================================
@@ -1079,6 +1138,27 @@ void udpTask(void* parameter) {
             xSemaphoreGive(stateMutex);
         }
 
+        // --- Core 1 → Core 0: send pending waypoint ARRIVED notification ---
+        // Uses lastNotifiedHash to avoid spamming the same notification repeatedly.
+        if (pendingArrivedNotification) {
+            const char* h = pendingArrivedHash;
+            if (h[0] != '\0') {
+                uint32_t now2 = millis();
+                if (strcmp(lastNotifiedHash, h) != 0 || now2 - lastArrivedNotifyTime >= ARRIVED_SPAM_INTERVAL_MS) {
+                    char buf[32];
+                    int len = buildArrivedMessage(buf, sizeof(buf), h);
+                    udp.beginPacket(phoneIP, udpPort);
+                    udp.write((uint8_t*)buf, len);
+                    udp.endPacket();
+                    strncpy(lastNotifiedHash, h, sizeof(lastNotifiedHash) - 1);
+                    lastNotifiedHash[sizeof(lastNotifiedHash) - 1] = '\0';
+                    lastArrivedNotifyTime = now2;
+                    Serial.printf("[ARRIVED] K:%s\n", h);
+                }
+            }
+            pendingArrivedNotification = false;
+        }
+
         // --- Periodic broadcasts ---
         uint32_t now = millis();
         if (now - lastStatusTime >= STATUS_INTERVAL_MS) {
@@ -1157,6 +1237,17 @@ void loop() {
     ServoAction actionToExecute = ServoAction::NONE;
     if (motionQueue.segmentJustCompleted) {
         actionToExecute = motionQueue.getLastCompletedServoAction();
+        // Capture the waypoint hash and signal Core 0 to send ARRIVED notification.
+        // Core 1 owns the motion queue; Core 0 owns all UDP sends. This shared flag
+        // lets Core 1 trigger the notification without blocking on a mutex.
+        const char* h = motionQueue.getCurrentWaypointHash();
+        if (h != nullptr && h[0] != '\0') {
+            if (strcmp(pendingArrivedHash, h) != 0) {
+                strncpy(pendingArrivedHash, h, sizeof(pendingArrivedHash) - 1);
+                pendingArrivedHash[sizeof(pendingArrivedHash) - 1] = '\0';
+                pendingArrivedNotification = true;
+            }
+        }
         // Clear flag now that we've captured the action
         motionQueue.segmentJustCompleted = false;
 

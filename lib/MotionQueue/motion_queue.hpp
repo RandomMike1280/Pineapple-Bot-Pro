@@ -166,6 +166,7 @@ struct MotionSegment {
     float        deferred_correction_x;  // accumulated drift for deferred policy
     float        deferred_correction_y;
     float        deferred_correction_angle;
+    char         waypointHash[16];  // unique hash for arrival notification
 
     MotionSegment() : direction(MoveDirection::INVALID), distance_mm(0),
                       speed(SpeedLevel::NORMAL), correctionPolicy(CorrectionPolicy::LIVE),
@@ -174,7 +175,9 @@ struct MotionSegment {
                       vx_mm_s(0), vy_mm_s(0), omega_deg_s(0), speed_mm_s(0), speed_deg_s(0),
                       isDurationBased(false), duration_ms(0), elapsed_ms(0),
                       state(SegmentState::PENDING), traveled_mm(0),
-                      deferred_correction_x(0), deferred_correction_y(0), deferred_correction_angle(0) {}
+                      deferred_correction_x(0), deferred_correction_y(0), deferred_correction_angle(0) {
+        waypointHash[0] = '\0';
+    }
 };
 
 class MotionQueue {
@@ -247,7 +250,8 @@ public:
     /// @returns true if enqueued, false if queue is full
     bool enqueueWaypoint(float target_x, float target_y, float targetAngle,
                          SpeedLevel speed, CorrectionPolicy policy, ServoAction action,
-                         float currentX, float currentY, float currentAngle);
+                         float currentX, float currentY, float currentAngle,
+                         const char* waypointHash = "");
 
     /// Enqueue a duration-based move segment (move for a fixed time).
     /// @returns true if enqueued, false if queue is full
@@ -297,6 +301,14 @@ public:
 
     /// Get the servo action of the segment that just completed
     ServoAction getLastCompletedServoAction() const;
+
+    /// Get the waypoint hash of the current (active) waypoint segment.
+    /// Returns empty string if no waypoint is active.
+    const char* getCurrentWaypointHash() const;
+
+    /// Set the waypoint hash on the current active segment (used by main.cpp
+    /// when a new waypoint arrives from the phone).
+    void setCurrentWaypointHash(const char* hash);
 
     /// Number of segments remaining (including active)
     int  remaining() const;

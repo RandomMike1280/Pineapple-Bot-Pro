@@ -167,26 +167,32 @@ bool parseUdpMessage(const char *buffer, int len, UdpMessage &out) {
             out.correctionPolicy != CorrectionPolicy::INVALID &&
             out.servoAction != ServoAction::INVALID);
 
-  case 'W': { // WAYPOINT — W:<x>:<y>[:<angle>]:<speed>:<policy>
+  case 'W': { // WAYPOINT — W:<x>:<y>[:<angle>]:<speed>:<policy>[:<action>[:<hash>]]
     if (numTokens < 5) return false;
     out.type = MsgType::WAYPOINT;
     float px = atof(tokens[1]);
     float py = atof(tokens[2]);
     out.target_x = py; // Swapped for robot-frame
     out.target_y = px; // Swapped for robot-frame
-    if (numTokens >= 6) {
-      // Full form: W:<x>:<y>:<angle>:<speed>:<policy>[:<action>]
+    if (numTokens >= 7) {
+      // Full form: W:<x>:<y>:<angle>:<speed>:<policy>[:<action>[:<hash>]]
       out.target_angle = atof(tokens[3]);
       out.speed = parseSpeed(tokens[4]);
       out.correctionPolicy = parsePolicy(tokens[5]);
-      if (numTokens >= 7) {
-        out.servoAction = parseServoAction(tokens[6]);
+      out.servoAction = parseServoAction(tokens[6]);
+      if (numTokens >= 8) {
+        strncpy(out.waypointHash, tokens[7], sizeof(out.waypointHash) - 1);
+        out.waypointHash[sizeof(out.waypointHash) - 1] = '\0';
+      } else {
+        out.waypointHash[0] = '\0';
       }
     } else {
       // Short form: W:<x>:<y>:<speed>:<policy>  (angle defaults to 0)
       out.target_angle = 0.0f;
       out.speed = parseSpeed(tokens[3]);
       out.correctionPolicy = parsePolicy(tokens[4]);
+      out.servoAction = ServoAction::NONE;
+      out.waypointHash[0] = '\0';
     }
     return (out.speed != SpeedLevel::INVALID &&
             out.correctionPolicy != CorrectionPolicy::INVALID &&
@@ -294,6 +300,13 @@ bool parseUdpMessage(const char *buffer, int len, UdpMessage &out) {
     out.duration_ms = (uint32_t)atoi(tokens[1]); // Reusing duration_ms for 0/1 flag
     return true;
 
+  case 'K': // ARRIVED — K:<waypoint_hash>
+    if (numTokens < 2) return false;
+    out.type = MsgType::ARRIVED;
+    strncpy(out.waypointHash, tokens[1], sizeof(out.waypointHash) - 1);
+    out.waypointHash[sizeof(out.waypointHash) - 1] = '\0';
+    return true;
+
   default:
     return false;
   }
@@ -331,4 +344,8 @@ int buildLogMessage(char *buf, int maxLen, char type, const char *logId,
   } else {
     return snprintf(buf, maxLen, "L:%c:%s", type, msg);
   }
+}
+
+int buildArrivedMessage(char *buf, int maxLen, const char *waypointHash) {
+  return snprintf(buf, maxLen, "K:%s", waypointHash);
 }

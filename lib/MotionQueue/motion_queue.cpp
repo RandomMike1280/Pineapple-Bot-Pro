@@ -1,5 +1,6 @@
 #include "motion_queue.hpp"
 #include <math.h>
+#include <string.h>
 #include "../Rotation/Rotation.hpp"
 
 // ============================================================================
@@ -258,7 +259,8 @@ float MotionQueue::_getSpeedDegS(SpeedLevel level) const {
 
 bool MotionQueue::enqueueWaypoint(float target_x, float target_y, float targetAngle,
                                   SpeedLevel speed, CorrectionPolicy policy, ServoAction action,
-                                  float currentX, float currentY, float currentAngle) {
+                                  float currentX, float currentY, float currentAngle,
+                                  const char* waypointHash) {
     if (_count >= MQ_MAX_SEGMENTS) return false;
 
     MotionSegment &seg = _segments[_tail % MQ_MAX_SEGMENTS];
@@ -272,6 +274,12 @@ bool MotionQueue::enqueueWaypoint(float target_x, float target_y, float targetAn
     seg.deferred_correction_x = 0;
     seg.deferred_correction_y = 0;
     seg.deferred_correction_angle = 0;
+    if (waypointHash && waypointHash[0] != '\0') {
+        strncpy(seg.waypointHash, waypointHash, sizeof(seg.waypointHash) - 1);
+        seg.waypointHash[sizeof(seg.waypointHash) - 1] = '\0';
+    } else {
+        seg.waypointHash[0] = '\0';
+    }
 
     // Determine start position for this segment
     if (_count == 0) {
@@ -1076,6 +1084,17 @@ void MotionQueue::getDeferredCorrection(float &errX, float &errY, float &errAngl
 ServoAction MotionQueue::getLastCompletedServoAction() const {
     int prevIdx = (_head - 1 + MQ_MAX_SEGMENTS) % MQ_MAX_SEGMENTS;
     return _segments[prevIdx].servoAction;
+}
+
+const char* MotionQueue::getCurrentWaypointHash() const {
+    if (_count == 0) return "";
+    return _segments[_head].waypointHash;
+}
+
+void MotionQueue::setCurrentWaypointHash(const char* hash) {
+    if (_count == 0) return;
+    strncpy(_segments[_head].waypointHash, hash, sizeof(_segments[_head].waypointHash) - 1);
+    _segments[_head].waypointHash[sizeof(_segments[_head].waypointHash) - 1] = '\0';
 }
 
 int MotionQueue::remaining() const {
