@@ -711,7 +711,8 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             float speed_scale = 1.0f;
 
             // Settling band threshold — within this, a gentle min-speed floor applies
-            float settlingDist = _waypointToleranceMm * 4.0f;
+            // Increased from 4× to 6× tolerance to start braking earlier and reduce overshoot
+            float settlingDist = _waypointToleranceMm * 6.0f;
             bool inSettlingBand = (dist_remaining < settlingDist);
 
             if (dist_remaining <= _waypointToleranceMm) {
@@ -746,10 +747,24 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
                         speed_scale *= heading_scale;
                     }
 
-                    // Precision min floor only OUTSIDE settling band
+                    // Phase out precision floor as robot approaches target.
+                    // The floor fights the close_scale ramp near the target, causing overshoot.
+                    // Fade it out: full floor far from target, zero inside settling band.
+                    float precisionFloor = 1.0f;
+                    if (dist_remaining < settlingDist) {
+                        precisionFloor = 0.0f;  // settling band takes over — no floor needed
+                    } else {
+                        // Linear fade from settling band edge to close-approach boundary
+                        precisionFloor = (dist_remaining - _waypointToleranceMm)
+                                      / (settlingDist - _waypointToleranceMm);
+                        if (precisionFloor > 1.0f) precisionFloor = 1.0f;
+                        if (precisionFloor < 0.0f) precisionFloor = 0.0f;
+                    }
+
                     if (seg.speed_mm_s > 0.001f) {
-                        float precision_min_scale = _precisionMinSpeedLimitMmS / seg.speed_mm_s;
-                        if (speed_scale < precision_min_scale) speed_scale = precision_min_scale;
+                        float floor = (precisionFloor * _precisionMinSpeedLimitMmS) / seg.speed_mm_s;
+                        floor = max(floor, 0.05f);  // absolute minimum: 5% of segmented speed
+                        if (speed_scale < floor) speed_scale = floor;
                     }
                 } else if (seg.speed_mm_s > 0.001f) {
                     float min_scale = _minSpeedLimitMmS / seg.speed_mm_s;
@@ -833,6 +848,18 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
 
             _currentVx = aim_dx * aim_inv * profiledTransSpeed;
             _currentVy = aim_dy * aim_inv * profiledTransSpeed;
+
+            // --- Momentum Counter-Braking ---
+            // When very close to target (within 2× tolerance), apply small counter-thrust
+            // to counteract wheel momentum that would otherwise carry robot past target.
+            if (dist_remaining < _waypointToleranceMm * 2.0f && profiledTransSpeed > 0.001f) {
+                float cmdSpd = sqrtf(_currentVx * _currentVx + _currentVy * _currentVy);
+                if (cmdSpd < _precisionMinSpeedLimitMmS * 1.5f) {
+                    // Apply small reverse to kill momentum faster
+                    _currentVx *= -0.15f;
+                    _currentVy *= -0.15f;
+                }
+            }
 
             // --- Feedforward from S-curve acceleration ---
             // Only apply feedforward during acceleration (positive accel).
@@ -1145,7 +1172,8 @@ void MotionQueue::debugLogWiggle(float current_x, float current_y, float current
 
     float heading_err = (Rotation(seg.target_angle) - Rotation(current_angle));
     float speed_scale = 1.0f;
-    float settlingDist = _waypointToleranceMm * 4.0f;
+    // Widened from 4× to 6× tolerance to match tick() behavior
+    float settlingDist = _waypointToleranceMm * 6.0f;
     bool inSettlingBand = (dist_remaining < settlingDist);
 
     if (dist_remaining <= _waypointToleranceMm) {
@@ -1153,10 +1181,7 @@ void MotionQueue::debugLogWiggle(float current_x, float current_y, float current
     } else if (inSettlingBand) {
         float settleNorm = (dist_remaining - _waypointToleranceMm) / (settlingDist - _waypointToleranceMm);
         speed_scale = settleNorm * 0.5f;
-        if (seg.speed_mm_s > 0.001f) {
-            float floor = _precisionMinSpeedLimitMmS / seg.speed_mm_s;
-            if (speed_scale < floor) speed_scale = floor;
-        }
+        // No precision floor inside settling band — the settle ramp handles final approach
     } else {
         if (_deccelDistMm > 0.001f && dist_remaining < _deccelDistMm) {
             speed_scale = cbrtf(dist_remaining / _deccelDistMm);
@@ -1174,9 +1199,20 @@ void MotionQueue::debugLogWiggle(float current_x, float current_y, float current
                 if (h_scale > 1.0f) h_scale = 1.0f;
                 speed_scale *= h_scale;
             }
+            // Phase out precision floor as robot approaches target
+            float precisionFloor = 1.0f;
+            if (dist_remaining < settlingDist) {
+                precisionFloor = 0.0f;
+            } else {
+                precisionFloor = (dist_remaining - _waypointToleranceMm)
+                             / (settlingDist - _waypointToleranceMm);
+                if (precisionFloor > 1.0f) precisionFloor = 1.0f;
+                if (precisionFloor < 0.0f) precisionFloor = 0.0f;
+            }
             if (seg.speed_mm_s > 0.001f) {
-                float pmin = _precisionMinSpeedLimitMmS / seg.speed_mm_s;
-                if (speed_scale < pmin) speed_scale = pmin;
+                float floor = (precisionFloor * _precisionMinSpeedLimitMmS) / seg.speed_mm_s;
+                floor = max(floor, 0.05f);
+                if (speed_scale < floor) speed_scale = floor;
             }
         } else if (seg.speed_mm_s > 0.001f) {
             float min_s = _minSpeedLimitMmS / seg.speed_mm_s;

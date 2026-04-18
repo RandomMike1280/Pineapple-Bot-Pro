@@ -58,7 +58,7 @@
 #define PRECISION_MODE_THRESH_MM 50       // Enter precision mode when remaining distance < this
 #define WAYPOINT_SAME_TARGET_TOL_MM 15.0f  // Threshold for "same target" deduplication
 #define PRECISION_KICKSTART_SUPPRESS true // Disable kickstart in precision mode to prevent wiggle
-#define PRECISION_MIN_SPEED_LIMIT_MM_S 18.0f
+#define PRECISION_MIN_SPEED_LIMIT_MM_S 10.0f
 #define PRECISION_MIN_ROT_LIMIT_DEG_S  5.0f
 #define CLOSE_APPROACH_DISTANCE_MM     120.0f
 #define CLOSE_ROT_APPROACH_DEG         8.0f
@@ -101,8 +101,8 @@
 // Predictive Braking — physics-based overshoot prevention
 // Uses observed closing speed and kinematic equation v² = 2*a*d to decide
 // if the robot can stop before the target.  If not, speed_scale is reduced.
-#define PREDICTIVE_BRAKE_DECEL_MM_S2   200.0f   // assumed deceleration capability (mm/s²)
-#define PREDICTIVE_BRAKE_SAFETY        1.5f     // safety margin (>1 = start braking earlier)
+#define PREDICTIVE_BRAKE_DECEL_MM_S2   250.0f   // assumed deceleration capability (mm/s²) — increased from 200 for better stopping
+#define PREDICTIVE_BRAKE_SAFETY        2.5f     // safety margin (>1 = start braking earlier)
 
 // S-Curve Trajectory Profile (Jerk-Limited Motion)
 // Instead of instantly commanding full speed, the trajectory generator
@@ -134,7 +134,7 @@
 // Process noise Q and measurement noise R tune responsiveness vs smoothness.
 #define KALMAN_PROCESS_NOISE_POS   0.5f    // position process noise variance
 #define KALMAN_PROCESS_NOISE_VEL   50.0f   // velocity process noise variance
-#define KALMAN_MEASUREMENT_NOISE   2.0f    // position measurement noise variance
+#define KALMAN_MEASUREMENT_NOISE   1.5f    // position measurement noise variance — lowered from 2.0 for faster velocity response
 
 // Anti-Slip / Stall Detection
 // If commanded speed > threshold but observed speed < threshold for N ticks,
@@ -174,9 +174,9 @@
 #define ROTATION_BRAKE_FRAMES       5
 #define ROTATION_BRAKE_DUTY         75
 #define ROTATION_BRAKE_MIN_OMEGA_DEG_S 5.0f
-#define TRANSLATION_BRAKE_FRAMES     4       // frames of reverse thrust (~12ms at 333Hz)
-#define TRANSLATION_BRAKE_DUTY      55      // reverse duty (less than rotation — wheels grip better)
-#define TRANSLATION_BRAKE_MIN_SPEED_MM_S 5.0f // only brake if observed speed above this
+#define TRANSLATION_BRAKE_FRAMES     8       // frames of reverse thrust (~24ms at 333Hz)
+#define TRANSLATION_BRAKE_DUTY      80      // reverse duty (higher = more stopping power)
+#define TRANSLATION_BRAKE_MIN_SPEED_MM_S 3.0f // lower threshold so brake fires more readily
 
 // ============================================================================
 // === Motor Physics API ===
