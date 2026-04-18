@@ -64,6 +64,7 @@ MotionQueue::MotionQueue()
       _adaptLookaheadMinS(0.04f), _adaptLookaheadMaxS(0.25f),
       _kalmanInitialized(false),
       _predictiveBrakeDecel(200.0f), _predictiveBrakeSafety(1.5f),
+      _latencyAwareDecelMmS2(0.0f),
       _slipCmdThresh(15.0f), _slipObsThresh(5.0f), _slipDetectTicks(25),
       _slipBoostFactor(1.35f), _slipBoostMaxTicks(40),
       _slipCounter(0), _slipBoostRemaining(0), _slipDetected(false),
@@ -156,6 +157,10 @@ void MotionQueue::setPredictiveBraking(float decel_mm_s2, float safety_factor) {
     _predictiveBrakeSafety = safety_factor;
 }
 
+void MotionQueue::setLatencyAwareDecel(float decel_mm_s2) {
+    _latencyAwareDecelMmS2 = decel_mm_s2;
+}
+
 void MotionQueue::getFeedforward(float &ff_vx, float &ff_vy, float &ff_omega) const {
     ff_vx = _ffVx; ff_vy = _ffVy; ff_omega = _ffOmega;
 }
@@ -231,7 +236,7 @@ void MotionQueue::_updateVelocityEstimate(float x, float y, float dt_s) {
 
     // Stationary deadzone: kill velocity estimate noise when nearly stopped
     float est_speed = sqrtf(_kalmanX.v * _kalmanX.v + _kalmanY.v * _kalmanY.v);
-    const float deadzoneMmS = 3.0f;
+    const float deadzoneMmS = 5.0f;
     if (est_speed < deadzoneMmS) {
         _kalmanX.v = 0.0f;
         _kalmanY.v = 0.0f;
@@ -793,6 +798,24 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
                         if (brake_scale < speed_scale) {
                             speed_scale = brake_scale;
                         }
+                    }
+                }
+            }
+
+            // Latency-aware speed cap — hard upper bound on commanded speed
+            // so the robot can always stop within the remaining distance.
+            // This is independent of the predictive braking check above, which
+            // uses observed closing speed. This uses the commanded speed and
+            // applies regardless of Kalman estimates, making it more robust to
+            // stale velocity signals near the target.
+            if (dist_remaining > _waypointToleranceMm && _latencyAwareDecelMmS2 > 0.001f) {
+                float cmdSpd = sqrtf(_currentVx * _currentVx + _currentVy * _currentVy);
+                if (cmdSpd > 0.001f) {
+                    float maxSafeSpeed = sqrtf(2.0f * _latencyAwareDecelMmS2 * dist_remaining);
+                    if (cmdSpd > maxSafeSpeed) {
+                        float capScale = maxSafeSpeed / cmdSpd;
+                        _currentVx *= capScale;
+                        _currentVy *= capScale;
                     }
                 }
             }

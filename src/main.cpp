@@ -1009,6 +1009,7 @@ void setup() {
     motionQueue.setSlipDetection(SLIP_CMD_SPEED_THRESH_MM_S, SLIP_OBS_SPEED_THRESH_MM_S,
                                   SLIP_DETECT_TICKS, SLIP_BOOST_FACTOR, SLIP_BOOST_MAX_TICKS);
     motionQueue.setPredictiveBraking(PREDICTIVE_BRAKE_DECEL_MM_S2, PREDICTIVE_BRAKE_SAFETY);
+    motionQueue.setLatencyAwareDecel(LATENCY_AWARE_DECEL_MM_S2);
 
     latencyComp.init(&deadReckoning, &motionQueue);
     latencyComp.setThresholds(DRIFT_THRESHOLD_MM, EMERGENCY_THRESHOLD_MM);
