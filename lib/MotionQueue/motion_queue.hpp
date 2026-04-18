@@ -235,6 +235,10 @@ public:
     /// Get the EMA-smoothed observed velocity (mm/s)
     void getEstimatedVelocity(float &vx, float &vy) const;
 
+    /// Get the camera-DR blended angle used for stabilization and heading transform.
+    /// Returns false if no camera observation has been received yet.
+    bool getBlendedAngle(float &out_angle) const;
+
     /// Enqueue a new motion segment.
     /// @param currentX, currentY, currentAngle current estimated position
     /// @returns true if enqueued, false if queue is full

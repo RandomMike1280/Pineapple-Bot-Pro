@@ -456,9 +456,16 @@ static void detectOperatingMode(const MotionSegment* seg, float cmdMag, float cx
 // ============================================================================
 
 static void computeHeadingVelocities(float vx, float vy, float omega,
-                                    float currentAngle, const MotionSegment* seg,
+                                    const MotionSegment* seg,
                                     double& V, double& H, double& A) {
-    float c_angle = currentAngle;
+    // Use blended camera-DR angle for heading transform when available.
+    // The blended angle converges to ground-truth and avoids the spurious strafe
+    // that occurs when the transform uses a drifting DR angle.
+    float c_angle;
+    if (!motionQueue.getBlendedAngle(c_angle)) {
+        float dummy_x, dummy_y;
+        deadReckoning.getCurrentPosition(dummy_x, dummy_y, c_angle);
+    }
     double V_out = 0, H_out = 0;
 
     if (SPEED_FAST_MM_S > 0.1f) {
@@ -638,7 +645,7 @@ void applyMotors() {
     float cx, cy, c_angle;
     getCurrentPose(cx, cy, c_angle);
     double V, H, A;
-    computeHeadingVelocities(vx, vy, omega, c_angle, seg, V, H, A);
+    computeHeadingVelocities(vx, vy, omega, seg, V, H, A);
 
     // #region agent_debug_log
     // Trace omega from motionQueue through to motor duty — verify stabilization is working
@@ -648,13 +655,18 @@ void applyMotors() {
             float heading_err = 0;
             float dist_rem = 0;
             if (seg && seg->state == SegmentState::ACTIVE) {
-                heading_err = (Rotation(seg->target_angle) - Rotation(c_angle));
+                // Use blended angle for heading error to match what stabilization uses
+                float stable_angle = c_angle;
+                if (!motionQueue.getBlendedAngle(stable_angle)) {
+                    stable_angle = c_angle;  // no camera yet — fall back to DR
+                }
+                heading_err = (Rotation(seg->target_angle) - Rotation(stable_angle));
                 float dx = seg->target_x - cx;
                 float dy = seg->target_y - cy;
                 dist_rem = sqrtf(dx*dx + dy*dy);
             }
             float gtAngle = latencyComp.getLastObservedAngle();
-            logger.update("STAB", "err=%.1f omega=%.1f A=%.3f dist=%.1f V=%.2f H=%.2f gt=%.1f",
+            logger.update("STAB", "err=%.1f omega=%.1f A=%.3f dist=%.1f V=%.2f H:%.2f gt=%.1f",
                 heading_err, omega, A, dist_rem, V, H, isnan(gtAngle) ? 0.0f : gtAngle);
             lastDebugTime = millis();
         }

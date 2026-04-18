@@ -185,6 +185,12 @@ void MotionQueue::getEstimatedVelocity(float &vx, float &vy) const {
     vy = _estVy;
 }
 
+bool MotionQueue::getBlendedAngle(float &out_angle) const {
+    if (!_angleBlendInitialized) return false;
+    out_angle = _blendedAngle;
+    return true;
+}
+
 void MotionQueue::_updateVelocityEstimate(float x, float y, float dt_s) {
     if (dt_s < 0.001f) return;
 
