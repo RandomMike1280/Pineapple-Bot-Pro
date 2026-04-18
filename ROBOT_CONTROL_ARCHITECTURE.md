@@ -14,7 +14,7 @@ The robot is remote-controlled via a custom UDP protocol using short ASCII strin
 
 **Key Commands:**
 - `M` / `D`: Move / Move Duration in a specific direction (Supports optional `[:<action>]` servo parameter).
-- `W`: Waypoint navigation to absolute coordinates `(x, y)` (Supports optional `[:<action>]` servo parameter. Repeated commands within a 15mm tolerance of the active target are deduplicated).
+- `W`: Waypoint navigation to absolute coordinates `(x, y)` (Format: `W:x:y:angle:speed:policy[:action]`. Supports optional `[:<action>]` servo parameter. Repeated commands within a 15mm tolerance of the active target are deduplicated).
 - `T` / `O`: Rotate to target angle / Rotate for duration.
 - `V`: Direct velocity control (`vx`, `vy`, `omega`) with a timeout.
 - `C`: Camera position updates from the phone.
@@ -24,28 +24,29 @@ The robot is remote-controlled via a custom UDP protocol using short ASCII strin
 - `X`: Mission sequence DONE signal. Triggers a visual 4-blink LED feedback sequence on the robot.
 - `A`: Immediate emergency stop (ABORT).
 
-Telemetry is sent periodically back to the phone via `STATUS` messages, which includes the estimated `(x, y, angle)`, motion queue length, current velocity, and drift. Additionally, if the Serial Monitor is enabled via the `U` command, the robot streams asynchronous `L` (Log) messages across UDP containing live debugging strings and system state (NDJSON formatted for some diagnostics) right to the phone interface.
+Telemetry is sent periodically back to the phone via `STATUS` messages (`S:y:x:angle:qLen:drift`), where `x` and `y` are swapped to match the phone's local coordinate system. Additionally, if the Serial Monitor is enabled via the `U` command, the robot streams asynchronous `L` (Log) messages containing live debugging strings and system state (NDJSON formatted for some diagnostics) right to the phone interface.
 
 ## 3. Motion Queue and Trajectory Profiling
 The `MotionQueue` subsystem receives high-level commands and sequences them into `MotionSegment` objects.
 - **Continuous Execution & Coasting Bridge:** Segments are queued (up to 16) and executed back-to-back. To prevent stuttering due to network jitter, a 40ms "Coasting Bridge" (`motionCommandGapHoldMs`) holds the previous velocity if the queue momentarily empties between contiguous commands.
-- **S-Curve Profiling:** For smooth acceleration and deceleration, the queue employs a jerk-limited S-Curve profiler. The linear parameters are tuned to `250 mm/s²` peak acceleration and `1200 mm/s³` peak jerk. This guarantees smooth trapezoidal acceleration that respects the robot's physical traction limits.
+- **S-Curve Profiling & Feedforward:** For smooth acceleration and deceleration, the queue employs a jerk-limited S-Curve profiler. It includes velocity and acceleration feedforward compensation (`FEEDFORWARD_KV`, `FEEDFORWARD_KA`) to reduce tracking lag. The linear parameters are tuned to `250 mm/s²` peak acceleration and `1200 mm/s³` peak jerk.
 - **Adaptive Lookahead:** Instead of a fixed lookahead, the steering algorithm utilizes an adaptive lookahead ($0.04\text{s}$ to $0.18\text{s}$) that scales with current speed ($lookahead = BASE + speed \times GAIN$). This compensates for momentum more aggressively at high speeds while maintaining stability during slow maneuvers.
 - **Predictive Braking:** The queue implements a physics-based overshoot prevention mechanism. It computes the maximum safe entry speed ($v_{safe} = \sqrt{2 \cdot a \cdot d}$) for the remaining distance $d$, assuming a $200\text{ mm/s}^2$ deceleration capability ($a$). If the closing speed exceeds $v_{safe}$, the velocity scale is proactively reduced.
+- **Blended Angle Stabilization:** To prevent "strafe-jumps" or oscillations during heading correction, the motion controller uses a **Blended Angle**. This combines the high-frequency internal Dead-Reckoning angle with the low-frequency Camera Ground-Truth angle, providing a smooth but authoritative heading reference for the PID stabilization loop.
 
 ## 4. Motor Kinematics and Actuation
 The robot employs a four-wheel Mecanum drive.
 - **Torque Balancing & Calibration:** The ESP32's PWM duties are scaled linearly against calibrated ranges (`duty = v * 43.017 + 57.165`) to bypass hardware dead-zones. To compensate for physical torque imbalance, right-side motors (M1, M4) have their duty reduced by a fixed `-3.0` offset, ensuring straight-line travel.
 - **Kickstart:** To overcome static friction, an immediate power boost (duty `70`) is applied across `3` frames (~9ms) whenever a motor abruptly breaks static hold.
-- **Precision Modes:** 
-  - *Precision Mode:* When `< 50mm` from a target, the robot enters precision mode. It utilizes "Induction Kickstart"—a conditional boost applied only if the motor is stalled (commanded speed $> 0.05$ while observed speed $< 1.5\text{ mm/s}$), preventing unnecessary wiggle.
-  - *Settling Band:* For the final $20\text{mm}$ of an approach (the "Settling Band"), the firmware switches from a fixed duty floor to a linear ramp-to-zero. This prevents the robot from oscillating around the target due to the minimal duty floor ($65$).
-  - *Single-Motor Mode (Micro-steps):* When `< 15mm` from a target and moving slowly ($< 10\text{ mm/s}$), only the single most optimally aligned wheel (determined by the dot product of the desired velocity against wheel vectors) is fired. This enables extreme micro-adjustments (~1-2mm) without overshooting.
+- **Operating Modes:**
+  - *Precision Mode:* When `< 50mm` from a target, the robot enters precision mode. It utilizes **Induction Kickstart**—a conditional boost applied only if the motor is stalled (commanded speed $> 0.05$ while observed speed $< 1.5\text{ mm/s}$), preventing unnecessary wiggle during fine adjustments.
+  - *Settling Band:* For the final $20\text{mm}$ of an approach, the firmware switches from a fixed duty floor to a linear ramp-to-zero.
+  - *Single-Motor Mode (Micro-steps):* When `< 15mm` from a target and moving slowly ($< 10\text{ mm/s}$), the robot activates **Single-Motor Mode**. It fires only the one wheel most optimally aligned with the desired velocity vector. This enables extreme micro-adjustments (~1-2mm) without overshooting or rotating.
 - **Anti-Slip / Stall Detection:** If the observed velocity falls below `5 mm/s` while the commanded speed remains over `20 mm/s` for 25 control ticks (~75ms), the firmware detects a stall. It applies a `1.35x` multiplicative power boost to break free.
 - **Active Braking (Reverse Thrust):** When a motion segment ends, the robot applies active reverse thrust (Reverse PWM) to kill momentum:
   - *Rotation:* Reverse duty `75` for `5` frames (~15ms).
   - *Translation:* Reverse duty `55` for `4` frames (~12ms), only if observed speed is $> 5\text{ mm/s}$.
-- **Drift Trim:** The translation outputs are pre-rotated slightly depending on speed to counteract hardware skew (e.g., $9.36^\circ$ for SLOW mode).
+- **Drift Trim:** The translation outputs are pre-rotated slightly to counteract hardware skew (e.g., $9.36^\circ$ for `SLOW` mode).
 
 ## 5. Dead Reckoning and Latency-Compensated Vision
 Rather than reacting abruptly to real-time observations, the system relies fundamentally on internal Dead-Reckoning, corrected smoothly by sporadic vision updates from an external tracker (an Android phone).
@@ -57,7 +58,7 @@ Rather than reacting abruptly to real-time observations, the system relies funda
    - It cross-references its `clockOffset` against its historical buffer to find where it *thought* it was at the exact instance the timeframe was captured.
    - The difference between the visual observation and the historical estimate becomes the measured drift. If the drift is > `5.0mm`, an active correction triggers.
    - This drift error is then blended forward into the active integration over a `200ms` interpolation window using a smooth correction policy.
-    - **Heading Authoritative Source:** For stabilization during movement, the internal controller uses the smooth Dead-Reckoning angle to avoid jumps. The external telemetry sent to the App prefers the camera Ground-Truth angle for visualization.
+   - **Heading Authority**: For motion stabilization, the controller utilizes the **Blended Angle** (Camera Ground-Truth fused with high-frequency DR) to prevent heading jumps and ensure stable straight-line tracking even during correction blends.
 
 ## 6. Physical Specifications & Kinematic Limits
 Based on hardware measurements, the system accounts for two distinct physical profiles for each robot configuration:
