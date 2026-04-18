@@ -205,28 +205,30 @@ MecanumSpeeds computeMecanumSpeeds(double V, double H, double A, bool lowSpeedMo
         }
     }
 
-    // Motor balance: right-side motors (M2=BR, M3=BL) produce more torque than
-    // left-side motors (M1=FR, M4=FL). Equalize by reducing right-side PWM magnitude.
+    // Motor balance: right-side motors (M1=FR, M4=BR) produce more torque than
+    // left-side motors (M2=FL, M3=BL). Equalize by reducing right-side PWM magnitude.
     //
-    // Key insight: "weaken" means reducing the magnitude of the duty cycle.
-    // Forward  (mspeedf > 0): subtract BALANCE → smaller positive = weaker forward
-    // Backward (mspeedf < 0): subtract BALANCE → larger negative = weaker backward
-    //   Example backward: -66 - 1.5 = -67.5 (more negative = weaker backward)
-    //   Bug: previous code ADDED for negative, making -64.5 (less negative = stronger)
-    const float BALANCE_RIGHT_REDUCE = 1.5f;
+    // MecanumSpeeds layout: M1=FR, M2=FL, M3=BL, M4=BR
+    // Right side = M1, M4 (indices 0, 3)
+    // Left side  = M2, M3 (indices 1, 2)
+    //
+    // The mecanum formula H-V-A / H+V-A / H+V+A / H-V+A means right side gets
+    // the "+A" terms added and left side gets "-A" terms subtracted, creating
+    // a base imbalance of 2*A in addition to the inherent torque difference.
+    const float BALANCE_RIGHT_REDUCE = 3.0f;
     for (int i = 0; i < 4; i++) {
-        if (i == 1 || i == 2) {
-            mspeedf[i] -= BALANCE_RIGHT_REDUCE;  // same operation for both signs
+        if (i == 0 || i == 3) {  // right-side motors: M1 (FR), M4 (BR)
+            mspeedf[i] -= BALANCE_RIGHT_REDUCE;
             float clamp_limit = DRIVE_CLAMP_LOW * 0.5f;
             if (mspeedf[i] > 0 && mspeedf[i] < clamp_limit) mspeedf[i] = clamp_limit;
             if (mspeedf[i] < 0 && mspeedf[i] > -clamp_limit) mspeedf[i] = -clamp_limit;
         }
     }
 
-    s.m1 = (int)mspeedf[0];  // Front Right
-    s.m2 = (int)mspeedf[1];  // Back Right
-    s.m3 = (int)mspeedf[2];  // Back Left
-    s.m4 = (int)mspeedf[3];  // Front Left
+    s.m1 = (int)mspeedf[0];  // Front Right (right side)
+    s.m2 = (int)mspeedf[1];  // Front Left  (left side)
+    s.m3 = (int)mspeedf[2];  // Back Left   (left side)
+    s.m4 = (int)mspeedf[3];  // Back Right  (right side)
 
     // DEBUG: Motor balance diagnostics — log balance adjustment near target
     {
@@ -240,8 +242,8 @@ MecanumSpeeds computeMecanumSpeeds(double V, double H, double A, bool lowSpeedMo
                 Serial.printf("[BAL] cmdSpd=%.3f M1=%+4d M2=%+4d M3=%+4d M4=%+4d | avg=%.1f | Ravg=%.1f Lavg=%.1f\n",
                     cmdSpd, s.m1, s.m2, s.m3, s.m4,
                     (s.m1 + s.m2 + s.m3 + s.m4) / 4.0f,
-                    (s.m2 + s.m3) / 2.0f,  // right: M2, M3
-                    (s.m1 + s.m4) / 2.0f); // left: M1, M4
+                    (s.m1 + s.m4) / 2.0f,  // right: M1 (FR), M4 (BR)
+                    (s.m2 + s.m3) / 2.0f); // left:  M2 (FL), M3 (BL)
             }
             lastBalLogMs = millis();
         }
@@ -1216,4 +1218,33 @@ void loop() {
         }
     }
 #endif
+
+    // #region agent_debug_log H3: motor control state diagnostics (every 5s)
+    {
+        static unsigned long lastDiagMs = 0;
+        if (now - lastDiagMs >= 5000) {
+            lastDiagMs = now;
+            float ax, ay;
+            deadReckoning.getAnchor(ax, ay);
+            float odoX, odoY, odoAngle;
+            deadReckoning.getOdoPosition(odoX, odoY, odoAngle);
+            float odoMag = sqrtf(odoX*odoX + odoY*odoY);
+            float anchorMag = sqrtf(ax*ax + ay*ay);
+            Serial.printf(
+                "{\"sessionId\":\"eb5734\",\"id\":\"main_%lu\",\"timestamp\":%lu,"
+                "\"location\":\"main.cpp:loop\",\"message\":\"H3_motor_ramp_state\",\"hypothesisId\":\"H3\","
+                "\"data\":{\"motorRampFactor\":%.4f,\"isMoving\":%d,"
+                "\"motorWasMoving\":%d,\"lastMotionWasRotationOnly\":%d,"
+                "\"mk0\":%d,\"mk1\":%d,\"mk2\":%d,\"mk3\":%d,"
+                "\"rotBrakeFrames\":%d,\"transBrakeFrames\":%d,"
+                "\"odoMag\":%.1f,\"anchorMag\":%.1f,\"odoAngle\":%.1f}}\n",
+                now, now,
+                motorRampFactor, isMoving,
+                motorWasMoving, lastMotionWasRotationOnly,
+                mkickstart[0], mkickstart[1], mkickstart[2], mkickstart[3],
+                rotationBrakeFrames, translationBrakeFrames,
+                (double)odoMag, (double)anchorMag, (double)odoAngle);
+        }
+    }
+    // #endregion
 }

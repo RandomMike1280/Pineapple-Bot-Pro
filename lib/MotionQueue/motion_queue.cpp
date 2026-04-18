@@ -3,6 +3,41 @@
 #include "../Rotation/Rotation.hpp"
 
 // ============================================================================
+// Agent Debug Logging — Serial NDJSON for long-run diagnostics
+// H2: Kalman covariance trace (p00+p11 per axis)
+// H4: profiledSpeed sanity (detect NaN or overflow)
+// ============================================================================
+static unsigned long _lastMqDiagLogMs = 0;
+static const unsigned long MQ_DIAG_LOG_INTERVAL_MS = 5000;
+
+static void _dbgLogMQDiag(
+    float kalmanTraceX, float kalmanTraceY,
+    float profiledTransSpeed, float profiledRotSpeed,
+    uint32_t tickTimeMs, int count,
+    const char* segState)
+{
+    unsigned long now = millis();
+    if (now - _lastMqDiagLogMs < MQ_DIAG_LOG_INTERVAL_MS) return;
+    _lastMqDiagLogMs = now;
+
+    bool transNaN = isnan(profiledTransSpeed) || isinf(profiledTransSpeed);
+    bool rotNaN = isnan(profiledRotSpeed) || isinf(profiledRotSpeed);
+
+    Serial.printf(
+        "{\"sessionId\":\"eb5734\",\"id\":\"mq_%lu\",\"timestamp\":%lu,"
+        "\"location\":\"motion_queue.cpp:tick\",\"message\":\"H2_H4_diagnostics\",\"hypothesisId\":\"H2+H4\","
+        "\"data\":{\"kalmanTraceX\":%.4f,\"kalmanTraceY\":%.4f,"
+        "\"profiledTransSpd\":%.3f,\"profiledRotSpd\":%.3f,"
+        "\"transNaN\":%d,\"rotNaN\":%d,"
+        "\"tickTimeMs\":%lu,\"qCount\":%d,\"segState\":\"%s\"}}\n",
+        now, now,
+        (double)kalmanTraceX, (double)kalmanTraceY,
+        (double)profiledTransSpeed, (double)profiledRotSpeed,
+        transNaN, rotNaN,
+        (unsigned long)tickTimeMs, count, segState);
+}
+
+// ============================================================================
 // Construction
 
 // ============================================================================
@@ -966,6 +1001,27 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             _currentVx = _currentVy = _currentOmega = 0;
         }
     }
+
+    // #region agent_debug_log H2+H4: Kalman covariance trace and profiledSpeed sanity
+    {
+        float kalmanTraceX = _kalmanX.p00 + _kalmanX.p11;
+        float kalmanTraceY = _kalmanY.p00 + _kalmanY.p11;
+        const char* stateName = "IDLE";
+        if (_count > 0) {
+            const MotionSegment& s = _segments[_head % MQ_MAX_SEGMENTS];
+            switch (s.state) {
+                case SegmentState::PENDING:    stateName = "PENDING";   break;
+                case SegmentState::ACTIVE:     stateName = "ACTIVE";    break;
+                case SegmentState::HOLDING:    stateName = "HOLDING";   break;
+                case SegmentState::COMPLETED:   stateName = "COMPLETED"; break;
+            }
+        }
+        _dbgLogMQDiag(
+            kalmanTraceX, kalmanTraceY,
+            _scurveTrans.profiledSpeed, _scurveRot.profiledSpeed,
+            _tickTimeMs, _count, stateName);
+    }
+    // #endregion
 
     return true;
 }

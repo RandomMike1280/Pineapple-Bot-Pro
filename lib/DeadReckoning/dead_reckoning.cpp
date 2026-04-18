@@ -1,4 +1,26 @@
 #include "dead_reckoning.hpp"
+#include <math.h>
+
+// ============================================================================
+// Agent Debug Logging — Serial NDJSON for long-run diagnostics
+// H1: Float precision of _ix/_iy vs anchor _ax/_ay
+// ============================================================================
+static unsigned long _lastDrFloatLogMs = 0;
+static const unsigned long DR_FLOAT_LOG_INTERVAL_MS = 5000;
+
+static void _dbgLogDRFloat(float ix, float iy, float ax, float ay) {
+    unsigned long now = millis();
+    if (now - _lastDrFloatLogMs < DR_FLOAT_LOG_INTERVAL_MS) return;
+    _lastDrFloatLogMs = now;
+    Serial.printf(
+        "{\"sessionId\":\"eb5734\",\"id\":\"dr_%lu\",\"timestamp\":%lu,"
+        "\"location\":\"dead_reckoning.cpp:update\",\"message\":\"H1_float_precision\",\"hypothesisId\":\"H1\","
+        "\"data\":{\"ix\":%.1f,\"iy\":%.1f,\"ax\":%.1f,\"ay\":%.1f,"
+        "\"odo_mag\":%.1f,\"anchor_mag\":%.1f}}\n",
+        now, now, ix, iy, ax, ay,
+        (double)sqrtf(ix*ix + iy*iy),
+        (double)sqrtf(ax*ax + ay*ay));
+}
 
 // ============================================================================
 // Construction / Reset
@@ -41,6 +63,10 @@ void DeadReckoning::update(float vx_mm_s, float vy_mm_s, float omega_deg_s, uint
     _ix += vx_mm_s * dt * _distFactorH;
     _iy += vy_mm_s * dt * _distFactorV;
     _ia += omega_deg_s * dt;
+
+    // #region agent_debug_log H1: float precision decay in odometer vs anchor
+    _dbgLogDRFloat(_ix, _iy, _ax, _ay);
+    // #endregion
 
     _recordSnapshot(millis());
 }

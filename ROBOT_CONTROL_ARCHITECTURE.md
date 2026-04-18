@@ -20,39 +20,44 @@ The robot is remote-controlled via a custom UDP protocol using short ASCII strin
 - `C`: Camera position updates from the phone.
 - `P` / `Q`: Ping / Pong for measuring network RTT and clock synchronization.
 - `E`: Execute standalone Servo Action (Supports complex sequencing like `LOWER_LEFT`, `LOWER_RIGHT`, `UPPER_LEFT`, `UPPER_RIGHT`, and discrete primitives like `GRABBER_LEFT`, `SLIDER_UP`, `ARM_DOWN`, etc.).
-- `U`: Set Serial Monitor (`U:<0|1>`). Opt-in to stream debug logs back to the phone.
-- `X`: Mission sequence DONE signal. Triggers visual 4-blink LED feedback on the robot.
+- `U`: Set Serial Monitor (`U:<0|1>`). Opt-in to stream asynchronous debug logs (`L` messages) back to the phone.
+- `X`: Mission sequence DONE signal. Triggers a visual 4-blink LED feedback sequence on the robot.
 - `A`: Immediate emergency stop (ABORT).
 
-Telemetry is sent periodically back to the phone via `STATUS` messages, which includes the estimated `(x, y, angle)`, motion queue length, current velocity, and drift. Additionally, if the Serial Monitor is enabled via the `U` command, the robot streams asynchronous `L` (Log) messages across UDP containing live debugging strings and system state right to the phone interface.
+Telemetry is sent periodically back to the phone via `STATUS` messages, which includes the estimated `(x, y, angle)`, motion queue length, current velocity, and drift. Additionally, if the Serial Monitor is enabled via the `U` command, the robot streams asynchronous `L` (Log) messages across UDP containing live debugging strings and system state (NDJSON formatted for some diagnostics) right to the phone interface.
 
 ## 3. Motion Queue and Trajectory Profiling
 The `MotionQueue` subsystem receives high-level commands and sequences them into `MotionSegment` objects.
-- **Continuous Execution:** Segments are queued (up to 16) and executed back-to-back. The robot does not stop between contiguous segments.
-- **S-Curve Profiling:** For smooth acceleration and deceleration, the queue employs a jerk-limited S-Curve profiler. The linear parameters are rigidly tuned to `250 mm/s²` peak acceleration and `1200 mm/s³` peak jerk. This guarantees smooth trapezoidal acceleration that respects the robot's physical traction limits.
-- **Predictive Steering & Braking:** The queue implements a Lookahead predictor (`0.15s` or adaptive based on speed) to anticipate drift/momentum. When arriving at a target, a predictive physics-based brake triggers and scales back kinetic energy (assuming a `200 mm/s²` decel capability) to prevent overshoot.
+- **Continuous Execution & Coasting Bridge:** Segments are queued (up to 16) and executed back-to-back. To prevent stuttering due to network jitter, a 40ms "Coasting Bridge" (`motionCommandGapHoldMs`) holds the previous velocity if the queue momentarily empties between contiguous commands.
+- **S-Curve Profiling:** For smooth acceleration and deceleration, the queue employs a jerk-limited S-Curve profiler. The linear parameters are tuned to `250 mm/s²` peak acceleration and `1200 mm/s³` peak jerk. This guarantees smooth trapezoidal acceleration that respects the robot's physical traction limits.
+- **Adaptive Lookahead:** Instead of a fixed lookahead, the steering algorithm utilizes an adaptive lookahead ($0.04\text{s}$ to $0.18\text{s}$) that scales with current speed ($lookahead = BASE + speed \times GAIN$). This compensates for momentum more aggressively at high speeds while maintaining stability during slow maneuvers.
+- **Predictive Braking:** The queue implements a physics-based overshoot prevention mechanism. It computes the maximum safe entry speed ($v_{safe} = \sqrt{2 \cdot a \cdot d}$) for the remaining distance $d$, assuming a $200\text{ mm/s}^2$ deceleration capability ($a$). If the closing speed exceeds $v_{safe}$, the velocity scale is proactively reduced.
 
 ## 4. Motor Kinematics and Actuation
 The robot employs a four-wheel Mecanum drive.
-- **Dead-Zone Compensation:** The ESP32's PWM duties are scaled linearly against calibrated ranges (`duty = v * 43.017 + 57.165`) to bypass hardware dead-zones. Absolute theoretical speed limits trace up to `72.5 mm/s` (Fast), `43.5 mm/s` (Normal), and `29 mm/s` (Slow).
+- **Torque Balancing & Calibration:** The ESP32's PWM duties are scaled linearly against calibrated ranges (`duty = v * 43.017 + 57.165`) to bypass hardware dead-zones. To compensate for physical torque imbalance, right-side motors (M1, M4) have their duty reduced by a fixed `-3.0` offset, ensuring straight-line travel.
 - **Kickstart:** To overcome static friction, an immediate power boost (duty `70`) is applied across `3` frames (~9ms) whenever a motor abruptly breaks static hold.
 - **Precision Modes:** 
-  - *Low-Speed Mode:* For speeds `< 10 mm/s`, kickstart is disabled and a lower absolute duty floor is utilized to prevent wiggling and allow smooth crawling.
-  - *Precision Mode:* When `< 50mm` from a target coordinate, the robot transitions to a finer duty floor. Instead of completely disabling kickstart, it utilizes a dynamic "induction kickstart" which applies a brief power boost only if motor stall is detected (observed speed ≈ 0 while commanded speed > 0.05), ensuring reliable sub-millimeter positioning without unnecessary oscillation.
-  - *Single-Motor Mode (Micro-steps):* When `< 15mm` from a target coordinate, only the single most optimally aligned wheel is fired at minimum duty to produce the smallest physical displacement. For ultra-short adjustments (`< 8mm`), the power floor is further restricted to the minimal reliable start threshold, enabling extreme micro-adjustments (~1-2mm) without overshooting.
-- **Anti-Slip / Stall Detection:** If the observed velocity falls below `5 mm/s` while the commanded speed remains over `20 mm/s` for 25 control ticks (~75ms), the firmware detects a stall/slip. It applies an immediate `1.35x` multiplicative power boost (up to 40 ticks) to break free from the obstacle or friction trap.
-- **Drift Trim:** The translation outputs are pre-rotated slightly depending on speed to compensate for systematic hardware skew.
+  - *Precision Mode:* When `< 50mm` from a target, the robot enters precision mode. It utilizes "Induction Kickstart"—a conditional boost applied only if the motor is stalled (commanded speed $> 0.05$ while observed speed $< 1.5\text{ mm/s}$), preventing unnecessary wiggle.
+  - *Settling Band:* For the final $20\text{mm}$ of an approach (the "Settling Band"), the firmware switches from a fixed duty floor to a linear ramp-to-zero. This prevents the robot from oscillating around the target due to the minimal duty floor ($65$).
+  - *Single-Motor Mode (Micro-steps):* When `< 15mm` from a target and moving slowly ($< 10\text{ mm/s}$), only the single most optimally aligned wheel (determined by the dot product of the desired velocity against wheel vectors) is fired. This enables extreme micro-adjustments (~1-2mm) without overshooting.
+- **Anti-Slip / Stall Detection:** If the observed velocity falls below `5 mm/s` while the commanded speed remains over `20 mm/s` for 25 control ticks (~75ms), the firmware detects a stall. It applies a `1.35x` multiplicative power boost to break free.
+- **Active Braking (Reverse Thrust):** When a motion segment ends, the robot applies active reverse thrust (Reverse PWM) to kill momentum:
+  - *Rotation:* Reverse duty `75` for `5` frames (~15ms).
+  - *Translation:* Reverse duty `55` for `4` frames (~12ms), only if observed speed is $> 5\text{ mm/s}$.
+- **Drift Trim:** The translation outputs are pre-rotated slightly depending on speed to counteract hardware skew (e.g., $9.36^\circ$ for SLOW mode).
 
 ## 5. Dead Reckoning and Latency-Compensated Vision
 Rather than reacting abruptly to real-time observations, the system relies fundamentally on internal Dead-Reckoning, corrected smoothly by sporadic vision updates from an external tracker (an Android phone).
 
-1. **Dead Reckoning (`DeadReckoning`)**: Integrates commanded and estimated velocities at each control loop interval (3ms) to confidently track position. A 1D Kalman Filter (per axis, Process Noise: `0.5`, Velocity: `50.0`) fuses raw motor velocity vectors to reject anomalies and provide smooth kinematic estimations.
+1. **Dead Reckoning (`DeadReckoning`)**: Integrates commanded and estimated velocities at each control loop interval (3ms) to confidently track position. A 1D Kalman Filter (per axis, Process Noise: `0.5` Pos / `50.0` Vel) fuses raw motor velocity vectors to reject anomalies. Dead-reckoning for horizontal strafing is calibrated with a $1.25$ factor, while vertical motion uses $1.0$.
 2. **Clock Offset (`PING`/`PONG`)**: The robot evaluates precise ping RTTs every `500ms` against the phone to synchronize its event timeline down to the millisecond.
 3. **Latency Compensation (`LatencyCompensator`)**: 
    - When a camera update (`CAM`) arrives, it is predictably assumed to bear an inherent ~`150ms` processing/network latency.
    - It cross-references its `clockOffset` against its historical buffer to find where it *thought* it was at the exact instance the timeframe was captured.
    - The difference between the visual observation and the historical estimate becomes the measured drift. If the drift is > `5.0mm`, an active correction triggers.
-   - This drift error is then blended forward into the active integration over a `200ms` interpolation window using a smooth correction policy. This gracefully bends the robot's coordinate system toward absolute truth without triggering erratic motor jumps.
+   - This drift error is then blended forward into the active integration over a `200ms` interpolation window using a smooth correction policy.
+    - **Heading Authoritative Source:** For stabilization during movement, the internal controller uses the smooth Dead-Reckoning angle to avoid jumps. The external telemetry sent to the App prefers the camera Ground-Truth angle for visualization.
 
 ## 6. Physical Specifications & Kinematic Limits
 Based on hardware measurements, the system accounts for two distinct physical profiles for each robot configuration:

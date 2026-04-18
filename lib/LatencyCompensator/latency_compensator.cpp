@@ -120,41 +120,44 @@ void LatencyCompensator::onCameraUpdate(uint32_t phoneTimestamp,
 
     // Step 5: Apply anchor offset so dead-reckoning stays in sync with camera.
     //
-    // Bug fix (2026-04-18): Previously, emergency corrections used setAnchorPositionOnly()
-    // which updated x/y but NOT angle. When angle drifted 130°+, the stabilization
-    // layer saw huge heading_err and commanded max omega, causing erratic behavior.
-    // Now angle is ALWAYS corrected, but with a continuity guard:
+    // Angle correction strategy:
+    //   - |angle_correction| <= 30°: full anchor correction (position + angle)
+    //   - 30° < |angle_correction| <= 90°: clamped anchor correction (limit to ±90°)
+    //   - |angle_correction| > 90°: shortest-path anchor (rotate +90° or -90° toward camera)
     //
-    //   - If |angle_jump| <= 90°: normal anchor correction (position + angle)
-    //   - If |angle_jump| > 90°: position-only anchor (avoid angle discontinuity)
-    //
-    // The 90° threshold handles the case where the camera reports an extreme angle
-    // that clearly represents a single-frame outlier or wrapping artifact (e.g. DR=0°,
-    // Cam=229°, jump=-129° is actually only -129° mod 360 = see note below).
-    //
-    // NOTE on angle wrapping: Camera angle 229° in a [0,360) system with DR at 0°
-    // should be interpreted as 229° = -131° (mod 360). The Rotation::operator-
-    // already uses shortest-path subtraction, so _lastDriftAngle = Rotation(229) - 0
-    // correctly gives -131°. But when this -131° is fed into stabilization
-    // (heading_err * gain), it produces max omega in the wrong direction.
-    // We now use the continuity guard to detect and suppress these pathological jumps.
+    // The 30° threshold handles most camera noise/quantization without disruption.
+    // The 90° cap on large jumps avoids spinning 270° the wrong direction — instead
+    // the robot rotates ±90° toward the camera angle, and subsequent frames fall into
+    // the [0, 90°] range for normal convergence.
 
     bool hasValidAngle = !isnan(observedAngle);
     if (hasValidAngle) {
-        // Compute the shortest-path angle correction
         float angleCorrection = Rotation(observedAngle) - Rotation(estAngle);
         float absAngleCorrection = fabsf(angleCorrection);
 
-        // If angle jump is pathological (> 90°), apply position-only anchor to
-        // avoid a massive stabilization spike that would destabilize the robot.
-        // Use position-only anchor: fixes x/y drift without disrupting heading.
-        if (absAngleCorrection > 90.0f) {
-            _dr->setAnchorPositionOnly(observedX, observedY, captureTime);
-        } else {
+        if (absAngleCorrection <= 30.0f) {
+            // Normal range: full anchor correction
             _dr->setAnchor(observedX, observedY, observedAngle, captureTime);
+        } else if (absAngleCorrection <= 90.0f) {
+            // Moderate jump: clamp angle to ±90° before applying anchor.
+            // This prevents the robot from winding from the wrong side while
+            // still correcting the majority of the drift.
+            float sign = (angleCorrection >= 0.0f) ? 1.0f : -1.0f;
+            float clampedAngle = estAngle + sign * 90.0f;
+            _dr->setAnchor(observedX, observedY, Rotation(clampedAngle), captureTime);
+        } else {
+            // Large pathological jump (> 90°): compute shortest-path camera angle.
+            // Position-only anchor fixes x/y but leaves angle unchanged, creating a
+            // feedback loop: every subsequent frame also sees > 90° error and
+            // never corrects angle. Instead, rotate to the shortest-path equivalent
+            // of the camera angle. This avoids spinning 270° the wrong way while
+            // still correcting heading so the next frame falls into the [0, 90°]
+            // range and gets normal correction.
+            float sign = (angleCorrection >= 0.0f) ? 1.0f : -1.0f;
+            float clampedAngle = estAngle + sign * 90.0f;
+            _dr->setAnchor(observedX, observedY, Rotation(clampedAngle), captureTime);
         }
     } else {
-        // No angle available — correct position only
         _dr->setAnchorPositionOnly(observedX, observedY, captureTime);
     }
 
