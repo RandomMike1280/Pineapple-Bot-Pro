@@ -383,6 +383,10 @@ private:
     KalmanAxis _kalmanY;
     bool _kalmanInitialized;
 
+    // === Angle Blending (Camera GT + DR EMA) ===
+    float _blendedAngle;            // EMA-fused angle: DR smoothness + camera truth
+    bool  _angleBlendInitialized;  // true after first camera observation
+
     // === Predictive Braking ===
     float _predictiveBrakeDecel;             // assumed deceleration capability (mm/s^2)
     float _predictiveBrakeSafety;            // safety margin factor

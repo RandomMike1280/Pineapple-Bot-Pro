@@ -53,7 +53,7 @@ MotionQueue::MotionQueue()
       _precisionMinSpeedLimitMmS(10.0f), _precisionMinRotLimitDegS(4.0f),
       _closeApproachDistMm(80.0f), _closeRotApproachDeg(8.0f),
       _waypointToleranceMm(12.0f), _rotToleranceDeg(2.0f),
-      _rotStabilizationGain(1.5f), _maxStabilizationOmega(35.0f),
+      _rotStabilizationGain(2.5f), _maxStabilizationOmega(35.0f),
       _prevPoseX(0), _prevPoseY(0), _hasPreviousPose(false),
       _estVx(0), _estVy(0), _lookaheadTimeS(0.15f), _tickTimeMs(0),
       _scurveMaxAccelMmS2(250.0f), _scurveMaxJerkMmS3(1200.0f),
@@ -67,7 +67,8 @@ MotionQueue::MotionQueue()
       _slipCmdThresh(15.0f), _slipObsThresh(5.0f), _slipDetectTicks(25),
       _slipBoostFactor(1.35f), _slipBoostMaxTicks(40),
       _slipCounter(0), _slipBoostRemaining(0), _slipDetected(false),
-      segmentJustCompleted(false)
+      segmentJustCompleted(false),
+      _blendedAngle(0.0f), _angleBlendInitialized(false)
 {
     _scurveTrans.reset(_scurveMaxAccelMmS2, _scurveMaxJerkMmS3);
     _scurveRot.reset(_scurveMaxRotAccelDegS2, _scurveMaxRotJerkDegS3);
@@ -578,6 +579,20 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
     // Update velocity estimate from observed position every tick
     _updateVelocityEstimate(current_x, current_y, dt_s);
 
+    // === Angle Blending: fuse camera GT with DR via EMA ===
+    // Short-term: smooth DR angle (avoids camera quantization jumps)
+    // Long-term: converges to camera angle (eliminates DR drift)
+    // This breaks the feedback loop where stabilization targets a drifting DR angle.
+    if (hasGroundTruth && !isnan(groundTruthAngle)) {
+        if (!_angleBlendInitialized) {
+            _blendedAngle = groundTruthAngle;
+            _angleBlendInitialized = true;
+        } else {
+            // EMA blend: 85% old blended, 15% new camera reading
+            _blendedAngle = _blendedAngle * 0.85f + groundTruthAngle * 0.15f;
+        }
+    }
+
     if (_count == 0) {
         _currentVx = _currentVy = _currentOmega = 0;
         return false;
@@ -681,17 +696,11 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             float dx = seg.target_x - current_x;
             float dy = seg.target_y - current_y;
             float dist_remaining = sqrtf(dx * dx + dy * dy);
-            // Use DR angle for ALL internal stabilization — NOT camera angle.
-            //
-            // PROBLEM with camera angle: camera angle has ~100° jumps every SYNC
-            // (DR=246°, Cam=1°, Error=115°). When stabilization uses camera angle,
-            // it creates a feedback loop: camera jumps, stabilization sees error,
-            // applies correction, robot moves, camera jumps again, repeat.
-            //
-            // Camera angle is only for external App display (sent via telemetry).
-            // All internal control (stabilization, heading error) must use DR angle,
-            // which changes smoothly without jumps.
-            float heading_err = (Rotation(seg.target_angle) - Rotation(current_angle));
+            // Use blended angle (DR + camera GT via EMA) for heading error.
+            // Pure DR angle drifts over time; pure camera angle has 100-deg quantization
+            // jumps. Blending gives smooth short-term tracking with long-term convergence.
+            float stable_angle = _angleBlendInitialized ? _blendedAngle : current_angle;
+            float heading_err = (Rotation(seg.target_angle) - Rotation(stable_angle));
             float abs_heading_err = fabsf(heading_err);
             float speed_scale = 1.0f;
 
@@ -1104,6 +1113,9 @@ void MotionQueue::abort() {
     _slipCounter = 0;
     _slipBoostRemaining = 0;
     _slipDetected = false;
+    // Reset angle blend — fresh camera observations needed after abort
+    _angleBlendInitialized = false;
+    _blendedAngle = 0.0f;
 }
 
 // ============================================================================
