@@ -2,9 +2,9 @@
 #include <esp32_servo.hpp>
 #include <Arduino.h>
 
-#define VAL_GRABBER_LEFT    (45 * 2)
-#define VAL_GRABBER_RIGHT   0
-#define VAL_GRABBER_CENTER  45
+#define VAL_GRABBER_LEFT     9 + (45 * 2)
+#define VAL_GRABBER_RIGHT    9 + 0
+#define VAL_GRABBER_CENTER   9 + 45
 #define VAL_SLIDER_UP        40
 #define VAL_SLIDER_DOWN      87
 #define VAL_ARM_UP           0
