@@ -10,8 +10,11 @@
 // Values that are NOT overridden here will use the defaults — this means you
 // only ever need to tweak the ones specific to this robot.
 
+#include "config_defaults.h"
+
 #define BOT_ID           "B"
 #define IS_BOT_B
+#define ARUCO_ID         1
 #define ROBOT_NAME       "Pineapple-Bot-B"
 
 // Speed & distance calibration for Robot B

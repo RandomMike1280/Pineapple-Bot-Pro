@@ -10,6 +10,8 @@
 // Values that are NOT overridden here will use the defaults — this means you
 // only ever need to tweak the ones specific to this robot.
 
+#include "config_defaults.h"
+
 #define BOT_ID           "A"
 #define IS_BOT_A
 #define ROBOT_NAME       "Pineapple-Bot-A"

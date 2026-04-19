@@ -344,3 +344,24 @@ int buildLogMessage(char *buf, int maxLen, char type, const char *logId,
     return snprintf(buf, maxLen, "L:%c:%s", type, msg);
   }
 }
+
+void directionToVector(MoveDirection dir, float &vx, float &vy) {
+  vx = 0.0f;
+  vy = 0.0f;
+  switch (dir) {
+  case MoveDirection::UP:
+    vy = 1.0f;
+    break;
+  case MoveDirection::DOWN:
+    vy = -1.0f;
+    break;
+  case MoveDirection::LEFT:
+    vx = -1.0f;
+    break;
+  case MoveDirection::RIGHT:
+    vx = 1.0f;
+    break;
+  default:
+    break;
+  }
+}

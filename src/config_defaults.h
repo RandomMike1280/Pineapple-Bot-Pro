@@ -32,6 +32,10 @@
 #define ROBOT_NAME            "Pineapple-Bot"
 #endif
 
+#ifndef ARUCO_ID
+#define ARUCO_ID             0
+#endif
+
 #ifndef LED
 #define LED                   2
 #endif
@@ -327,8 +331,9 @@
 // Feedforward — pre-compensate inertia and friction.
 // ---------------------------------------------------------------------------
 #define DEFAULT_PREDICTIVE_LOOKAHEAD_S      0.15f
-#define DEFAULT_PREDICTIVE_BRAKE_DECEL_MM_S2  200.0f
-#define DEFAULT_PREDICTIVE_BRAKE_SAFETY        1.5f
+#define DEFAULT_PREDICTIVE_BRAKE_DECEL_MM_S2  350.0f
+#define DEFAULT_PREDICTIVE_BRAKE_SAFETY        1.2f
+#define DEFAULT_LATENCY_AWARE_DECEL_MM_S2     300.0f
 #define DEFAULT_SCURVE_MAX_ACCEL_MM_S2        250.0f
 #define DEFAULT_SCURVE_MAX_JERK_MM_S3        1200.0f
 #define DEFAULT_SCURVE_MAX_ROT_ACCEL_DEG_S2   180.0f
@@ -352,6 +357,10 @@
 
 #ifndef PREDICTIVE_BRAKE_SAFETY
 #define PREDICTIVE_BRAKE_SAFETY   DEFAULT_PREDICTIVE_BRAKE_SAFETY
+#endif
+
+#ifndef LATENCY_AWARE_DECEL_MM_S2
+#define LATENCY_AWARE_DECEL_MM_S2 DEFAULT_LATENCY_AWARE_DECEL_MM_S2
 #endif
 
 #ifndef SCURVE_MAX_ACCEL_MM_S2
@@ -426,9 +435,9 @@
 // ---------------------------------------------------------------------------
 #define DEFAULT_SLIP_CMD_SPEED_THRESH_MM_S  20.0f
 #define DEFAULT_SLIP_OBS_SPEED_THRESH_MM_S  5.0f
-#define DEFAULT_SLIP_DETECT_TICKS            25
+#define DEFAULT_SLIP_DETECT_TICKS            75
 #define DEFAULT_SLIP_BOOST_FACTOR            1.35f
-#define DEFAULT_SLIP_BOOST_MAX_TICKS         40
+#define DEFAULT_SLIP_BOOST_MAX_TICKS         100
 
 #ifndef SLIP_CMD_SPEED_THRESH_MM_S
 #define SLIP_CMD_SPEED_THRESH_MM_S  DEFAULT_SLIP_CMD_SPEED_THRESH_MM_S
@@ -456,7 +465,7 @@
 #define DEFAULT_STATUS_INTERVAL_MS    100
 #define DEFAULT_HELLO_INTERVAL_MS   3000
 #define DEFAULT_PING_INTERVAL_MS      500
-#define DEFAULT_CONTROL_LOOP_INTERVAL_MS 3
+#define DEFAULT_CONTROL_LOOP_INTERVAL_MS 1
 #define DEFAULT_DONE_FEEDBACK_BLINKS   4
 
 #ifndef STATUS_INTERVAL_MS
@@ -485,11 +494,11 @@
 // ROTATION_BRAKE_*: kick brief reverse thrust to kill angular momentum.
 // TRANSLATION_BRAKE_*: reverse thrust to kill physical coasting momentum.
 // ---------------------------------------------------------------------------
-#define DEFAULT_ROTATION_BRAKE_FRAMES            5
+#define DEFAULT_ROTATION_BRAKE_FRAMES            15
 #define DEFAULT_ROTATION_BRAKE_DUTY              75
 #define DEFAULT_ROTATION_BRAKE_MIN_OMEGA_DEG_S    5.0f
-#define DEFAULT_TRANSLATION_BRAKE_FRAMES           4
-#define DEFAULT_TRANSLATION_BRAKE_DUTY            55
+#define DEFAULT_TRANSLATION_BRAKE_FRAMES           18
+#define DEFAULT_TRANSLATION_BRAKE_DUTY            80
 #define DEFAULT_TRANSLATION_BRAKE_MIN_SPEED_MM_S   5.0f
 
 #ifndef ROTATION_BRAKE_FRAMES
