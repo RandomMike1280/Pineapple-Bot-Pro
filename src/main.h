@@ -1,6 +1,26 @@
 #ifndef MAIN_H
 #define MAIN_H
 
+// ============================================================================
+// SWITCH ROBOT HERE — pick one, comment out the other
+// ============================================================================
+// Before uploading, ensure the correct config is selected below.
+// Each config file contains its own WiFi credentials and robot-specific
+// calibration values; all other constants are shared defaults.
+#include "config_a.h"   // <-- Robot A
+// #include "config_b.h" // <-- Robot B (uncomment this, comment out config_a.h)
+
+// If you see this error, no robot config is selected. Uncomment one above.
+#ifdef CONFIG_DEFAULTS_H
+// good
+#else
+#error "No robot config selected — include config_a.h or config_b.h above."
+#endif
+
+// ============================================================================
+// External Library Headers
+// ============================================================================
+
 #include <Arduino.h>
 #include <esp32_motor.hpp>
 #include <esp32_servo.hpp>
@@ -217,7 +237,9 @@ struct MecanumSpeeds {
 /// V = forward/backward (-1..1), H = strafe (-1..1), A = rotation (-1..1)
 /// Applies speed_to_motor_duty, normalization, and kickstart.
 /// @param precisionMode when true, uses lower duty floor for fine positioning
-MecanumSpeeds computeMecanumSpeeds(double V, double H, double A, bool lowSpeedMode = false, bool precisionMode = false);
+MecanumSpeeds computeMecanumSpeeds(double V, double H, double A,
+                                  bool lowSpeedMode = false,
+                                  bool precisionMode = false);
 
 /// Compute single-motor duty for ultra-fine micro-adjustments.
 /// Only one motor is active at a time, producing ~1-2mm steps.
@@ -225,7 +247,7 @@ MecanumSpeeds computeMecanumSpeeds(double V, double H, double A, bool lowSpeedMo
 MecanumSpeeds computeSingleMotorSpeeds(double V, double H);
 
 // ============================================================================
-// === Robot Control API ===
+// Robot Control API
 // ============================================================================
 
 /// Apply motor speeds from current motion queue state (~333 Hz loop on Core 1)
@@ -235,7 +257,7 @@ void applyMotors();
 void handleParsedMessage(const UdpMessage &msg);
 
 // ============================================================================
-// === Communication API ===
+// Communication API
 // ============================================================================
 
 /// Send telemetry status to phone (every STATUS_INTERVAL_MS)
@@ -248,7 +270,7 @@ void sendHello();
 void sendPing();
 
 // ============================================================================
-// === Dual-Core API ===
+// Dual-Core API
 // ============================================================================
 
 /// Core 0 task: UDP packet processing, command parsing, periodic broadcasts

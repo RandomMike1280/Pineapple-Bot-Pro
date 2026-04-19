@@ -86,6 +86,12 @@ enum class ServoAction : uint8_t {
     SLIDER_DOWN,
     ARM_DOWN,
     ARM_UP,
+    FRUIT,
+    DROPPER_OPEN,
+    DROPPER_CLOSE,
+    CEIL_OPEN,
+    CEIL_CLOSE,
+    CEIL_WATER,
     INVALID
 };
 

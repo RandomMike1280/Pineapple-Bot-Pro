@@ -87,6 +87,18 @@ ServoAction parseServoAction(const char *str) {
     return ServoAction::ARM_DOWN;
   if (strcmp(str, "arm_up") == 0 || strcmp(str, "AU") == 0)
     return ServoAction::ARM_UP;
+  if (strcmp(str, "fruit") == 0 || strcmp(str, "FRUIT") == 0)
+    return ServoAction::FRUIT;
+  if (strcmp(str, "dropper_open") == 0 || strcmp(str, "DO") == 0)
+    return ServoAction::DROPPER_OPEN;
+  if (strcmp(str, "dropper_close") == 0 || strcmp(str, "DC") == 0)
+    return ServoAction::DROPPER_CLOSE;
+  if (strcmp(str, "ceil_open") == 0 || strcmp(str, "CO") == 0)
+    return ServoAction::CEIL_OPEN;
+  if (strcmp(str, "ceil_close") == 0 || strcmp(str, "CC") == 0)
+    return ServoAction::CEIL_CLOSE;
+  if (strcmp(str, "ceil_water") == 0 || strcmp(str, "CW") == 0)
+    return ServoAction::CEIL_WATER;
   return ServoAction::INVALID;
 }
 

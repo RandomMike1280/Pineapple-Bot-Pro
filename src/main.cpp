@@ -8,7 +8,8 @@
 //   4. Receives camera observations from the phone and applies
 //      latency-compensated corrections (smooth, no jumps)
 //
-// The same firmware runs on both robots — only BOT_ID in main.h differs.
+// The same firmware runs on both robots — only the config file selected
+// in main.h differs.  See main.h and the config_*.h files for details.
 // ============================================================================
 
 #include <WiFi.h>
@@ -24,10 +25,16 @@
 #include <opt_math.hpp>
 
 // ============================================================================
-// WiFi Configuration
+// WiFi Configuration — pulled from the selected robot config (config_a.h / config_b.h)
 // ============================================================================
-const char* ssid     = "IPhone 19 Professional";
-const char* password = "sixseven";
+#ifndef ROBOT_WIFI_SSID
+#define ROBOT_WIFI_SSID     "UNKNOWN_SSID"
+#endif
+#ifndef ROBOT_WIFI_PASS
+#define ROBOT_WIFI_PASS     "UNKNOWN_PASS"
+#endif
+const char* ssid     = ROBOT_WIFI_SSID;
+const char* password = ROBOT_WIFI_PASS;
 
 // ============================================================================
 // Subsystem instances
