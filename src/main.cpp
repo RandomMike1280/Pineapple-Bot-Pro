@@ -1196,8 +1196,13 @@ void loop() {
     motionQueue.debugLogWiggle(current_x, current_y, current_angle);
 
     // ---- Update dead-reckoning ----
-    // Use the same dt calculated at the top of the loop for consistency
-    deadReckoning.update(currentVx, currentVy, currentOmega, dt);
+    // Use EMA-smoothed commanded velocity for DR integration instead of raw
+    // _currentVx/Vy. The raw velocity drops to 0 instantly when speed_scale→0,
+    // but the robot physically coasts for ~30ms. The EMA velocity decays naturally
+    // over this coast period, so DR position stays accurate.
+    float emaVx, emaVy;
+    motionQueue.getEmaVelocity(emaVx, emaVy);
+    deadReckoning.update(emaVx, emaVy, currentOmega, dt);
 
     xSemaphoreGive(stateMutex);
 
@@ -1251,13 +1256,15 @@ void loop() {
                 "\"motorWasMoving\":%d,\"lastMotionWasRotationOnly\":%d,"
                 "\"mk0\":%d,\"mk1\":%d,\"mk2\":%d,\"mk3\":%d,"
                 "\"rotBrakeFrames\":%d,\"transBrakeFrames\":%d,"
-                "\"odoMag\":%.1f,\"anchorMag\":%.1f,\"odoAngle\":%.1f}}\n",
+                "\"odoMag\":%.1f,\"anchorMag\":%.1f,\"odoAngle\":%.1f,"
+                "\"emaVx\":%.2f,\"emaVy\":%.2f}}\n",
                 now, now,
                 motorRampFactor, isMoving,
                 motorWasMoving, lastMotionWasRotationOnly,
                 mkickstart[0], mkickstart[1], mkickstart[2], mkickstart[3],
                 rotationBrakeFrames, translationBrakeFrames,
-                (double)odoMag, (double)anchorMag, (double)odoAngle);
+                (double)odoMag, (double)anchorMag, (double)odoAngle,
+                (double)emaVx, (double)emaVy);
         }
     }
     // #endregion
