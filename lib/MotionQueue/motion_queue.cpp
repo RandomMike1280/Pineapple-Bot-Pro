@@ -56,7 +56,8 @@ MotionQueue::MotionQueue()
       _waypointToleranceMm(12.0f), _rotToleranceDeg(2.0f),
       _rotStabilizationGain(2.5f), _maxStabilizationOmega(35.0f),
       _prevPoseX(0), _prevPoseY(0), _hasPreviousPose(false),
-      _estVx(0), _estVy(0), _lookaheadTimeS(0.15f), _tickTimeMs(0),
+      _estVx(0), _estVy(0), _emaVx(0), _emaVy(0),
+      _lookaheadTimeS(0.15f), _tickTimeMs(0),
       _scurveMaxAccelMmS2(250.0f), _scurveMaxJerkMmS3(1200.0f),
       _scurveMaxRotAccelDegS2(180.0f), _scurveMaxRotJerkDegS3(900.0f),
       _ffKv(0.02f), _ffKa(0.04f), _ffKvRot(0.01f), _ffKaRot(0.02f),
@@ -195,6 +196,11 @@ bool MotionQueue::getBlendedAngle(float &out_angle) const {
     if (!_angleBlendInitialized) return false;
     out_angle = _blendedAngle;
     return true;
+}
+
+void MotionQueue::getEmaVelocity(float &vx, float &vy) const {
+    vx = _emaVx;
+    vy = _emaVy;
 }
 
 void MotionQueue::_updateVelocityEstimate(float x, float y, float dt_s) {
@@ -909,6 +915,20 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
         }
     }
 
+    // --- EMA-Smoothed Commanded Velocity for DR Integration ---
+    // _currentVx/Vy drops to 0 instantly when speed_scale→0. If fed directly
+    // to dead-reckoning, DR freezes while the robot coasts, creating a "coast gap"
+    // that manifests as consistent overshoot past the target.
+    //
+    // Fix: EMA-smoothed velocity decays naturally from _currentVx/Vy toward 0.
+    // alpha=0.9 gives tau=10ms (≈30 ticks to settle at 1kHz), matching the
+    // physical coast time of the robot after power is cut. DR integrates
+    // through this period, so its position estimate matches reality.
+    // Kalman velocity is still used for predictive steering/braking.
+    const float EMA_ALPHA = 0.9f;
+    _emaVx = EMA_ALPHA * _emaVx + (1.0f - EMA_ALPHA) * _currentVx;
+    _emaVy = EMA_ALPHA * _emaVy + (1.0f - EMA_ALPHA) * _currentVy;
+
     // --- SLIP / STALL DETECTION ---
     // Compare commanded speed vs Kalman-observed speed.
     // Only check when NOT in settling band — near the target, low speed is expected.
@@ -1132,8 +1152,8 @@ void MotionQueue::abort() {
     segmentJustCompleted = false;
     // Reset velocity tracking — stale estimates must not corrupt next segment
     _hasPreviousPose = false;
-    _estVx = 0;
-    _estVy = 0;
+    _estVx = 0; _estVy = 0;
+    _emaVx = 0; _emaVy = 0;
     // Reset Kalman filter so next segment starts fresh
     _kalmanInitialized = false;
     // Reset S-curve profilers

@@ -244,6 +244,12 @@ public:
     /// Returns false if no camera observation has been received yet.
     bool getBlendedAngle(float &out_angle) const;
 
+    /// Get the EMA-smoothed commanded velocity (mm/s) for DR integration.
+    /// This decays naturally toward zero when speed_scale drops, giving DR a
+    /// smooth velocity estimate that prevents the "coast gap" overshoot where
+    /// DR stops updating while the robot is still physically moving.
+    void getEmaVelocity(float &vx, float &vy) const;
+
     /// Enqueue a new motion segment.
     /// @param currentX, currentY, currentAngle current estimated position
     /// @returns true if enqueued, false if queue is full
@@ -365,6 +371,7 @@ private:
     float _prevPoseX, _prevPoseY;
     bool  _hasPreviousPose;
     float _estVx, _estVy;                    // Kalman-estimated velocity (mm/s)
+    float _emaVx, _emaVy;                   // EMA-smoothed commanded velocity (mm/s) — for DR integration
     float _lookaheadTimeS;                   // base lookahead (seconds)
     uint32_t _tickTimeMs;                   // monotonic tick timer
 
