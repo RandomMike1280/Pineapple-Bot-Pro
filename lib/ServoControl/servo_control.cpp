@@ -1,7 +1,6 @@
 #include "servo_control.hpp"
 #include <esp32_servo.hpp>
 #include <Arduino.h>
-#include "main.h"
 
 // ============================================================================
 // Robot A Servo Actions

@@ -198,6 +198,12 @@ bool MotionQueue::getBlendedAngle(float &out_angle) const {
     return true;
 }
 
+bool MotionQueue::isHolding() const {
+    if (_count == 0) return false;
+    const MotionSegment &seg = _segments[_head % MQ_MAX_SEGMENTS];
+    return seg.state == SegmentState::HOLDING;
+}
+
 void MotionQueue::getEmaVelocity(float &vx, float &vy) const {
     vx = _emaVx;
     vy = _emaVy;
@@ -994,28 +1000,35 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             // --- PREDICTIVE COMPLETION CHECK ---
             float heading_err = (Rotation(seg.target_angle) - Rotation(current_angle));
 
+            // Determine the best velocity estimate for completion checking.
+            // Kalman velocity gets zeroed by its deadzone when near the target,
+            // causing premature "done" declarations while the robot still coasts.
+            // Fall back to EMA velocity (decays naturally after commanded speed drops)
+            // or profiled commanded speed when both estimates are unreliable.
             float obsSpd = fastLength2(_estVx, _estVy);
-            
+            float emaSpd = fastLength2(_emaVx, _emaVy);
+            float spdToUse = (obsSpd > 2.0f) ? obsSpd : emaSpd;
+
             // Compute stopping distance: d = v^2/(2*a)
             float stoppingDist = 0.0f;
-            if (obsSpd > 0.001f && _predictiveBrakeDecel > 0.001f) {
-                stoppingDist = (obsSpd * obsSpd) / (2.0f * _predictiveBrakeDecel);
+            if (_predictiveBrakeDecel > 0.001f && spdToUse > 0.001f) {
+                stoppingDist = (spdToUse * spdToUse) / (2.0f * _predictiveBrakeDecel);
                 // Apply safety margin to ensure we stop WITHIN tolerance
                 stoppingDist *= _predictiveBrakeSafety;
             }
-            
+
             // Calculate margin to tolerance boundary
             float marginToTolerance = dist_remaining - _waypointToleranceMm;
-            
+
             // Three-way completion gate:
             // 1. Position within tolerance
-            // 2. Heading within tolerance  
+            // 2. Heading within tolerance
             // 3. Either nearly stopped OR stopping distance less than margin
             bool atPositionTolerance = (dist_remaining <= _waypointToleranceMm);
             bool atHeadingTolerance = (fabsf(heading_err) <= _rotToleranceDeg);
-            bool willStopInTolerance = (obsSpd < _precisionMinSpeedLimitMmS * 1.5f) ||
+            bool willStopInTolerance = (spdToUse < _precisionMinSpeedLimitMmS * 1.5f) ||
                                        (stoppingDist <= marginToTolerance + _waypointToleranceMm);
-            
+
             if (atPositionTolerance && atHeadingTolerance && willStopInTolerance) {
                 done = true;
             }
@@ -1058,7 +1071,31 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
 
         if (withinTol) {
             _currentVx = _currentVy = _currentOmega = 0;
+        } else {
+            // When already at position tolerance but heading is slightly off, heading
+            // stabilization tries to correct by rotating. Mecanum wheels can't produce
+            // pure torque — any rotation creates lateral drift, which then triggers
+            // translation correction, creating a forward/back oscillation.
+            // Suppress translation velocity while within position tolerance to break
+            // this loop. Only allow heading correction (omega) to run.
+            float dx = seg.target_x - current_x;
+            float dy = seg.target_y - current_y;
+            if (fastLength2(dx, dy) <= _waypointToleranceMm) {
+                _currentVx = 0;
+                _currentVy = 0;
+            }
         }
+    }
+
+    // Freeze dead-reckoning velocity during HOLDING state so DR doesn't drift while
+    // the robot is physically stopped. Without this, DR keeps integrating even when
+    // motors are at zero, accumulating phantom position error that eventually causes
+    // the HOLDING correction to re-trigger motion in the wrong direction.
+    if (seg.state == SegmentState::HOLDING) {
+        _emaVx = 0;
+        _emaVy = 0;
+        _estVx = 0;
+        _estVy = 0;
     }
 
     // #region agent_debug_log H2+H4: Kalman covariance trace and profiledSpeed sanity
@@ -1195,12 +1232,11 @@ void MotionQueue::debugLogWiggle(float current_x, float current_y, float current
     if (dist_remaining <= _waypointToleranceMm) {
         speed_scale = 0.0f;
     } else if (inSettlingBand) {
-        float settleNorm = (dist_remaining - _waypointToleranceMm) / (settlingDist - _waypointToleranceMm);
+        // Settling band: linear ramp from 50% to 0%.
+        // NO precision floor — the ramp naturally drives speed to 0 near target.
+        float settleNorm = (dist_remaining - _waypointToleranceMm)
+                         / (settlingDist - _waypointToleranceMm);
         speed_scale = settleNorm * 0.5f;
-        if (seg.speed_mm_s > 0.001f) {
-            float floor = _precisionMinSpeedLimitMmS / seg.speed_mm_s;
-            if (speed_scale < floor) speed_scale = floor;
-        }
     } else {
         if (_deccelDistMm > 0.001f && dist_remaining < _deccelDistMm) {
             speed_scale = fastCbrtf(dist_remaining / _deccelDistMm);

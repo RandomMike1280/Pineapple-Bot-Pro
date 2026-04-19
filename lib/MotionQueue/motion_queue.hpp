@@ -244,6 +244,9 @@ public:
     /// Returns false if no camera observation has been received yet.
     bool getBlendedAngle(float &out_angle) const;
 
+    /// Returns true if the motion queue is currently in HOLDING state.
+    bool isHolding() const;
+
     /// Get the EMA-smoothed commanded velocity (mm/s) for DR integration.
     /// This decays naturally toward zero when speed_scale drops, giving DR a
     /// smooth velocity estimate that prevents the "coast gap" overshoot where

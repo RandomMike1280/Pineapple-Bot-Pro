@@ -399,6 +399,17 @@ static bool applyRotationBrake() {
 // ============================================================================
 
 static bool detectAndStartTranslationBrake() {
+    // Don't initiate translation brake when in HOLDING state.
+    // HOLDING means the motion queue has reached the target and is applying
+    // small corrective velocities. The translation brake would fight these
+    // corrections, creating an oscillation: robot overshoots, HOLDING corrects
+    // backward, brake kicks reverse thrust, robot overshoots the other way.
+    const MotionSegment* holdSeg = motionQueue.currentSegment();
+    bool isHolding = holdSeg && holdSeg->state == SegmentState::HOLDING;
+    if (isHolding) {
+        return false;
+    }
+
     if (!isMoving && motorWasMoving && !lastMotionWasRotationOnly &&
         translationBrakeFrames == 0 && !suppressRotationBrake) {
         float estVx, estVy;

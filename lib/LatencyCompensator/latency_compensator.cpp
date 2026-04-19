@@ -63,6 +63,13 @@ void LatencyCompensator::onCameraUpdate(uint32_t phoneTimestamp,
         return;
     }
 
+    // Skip camera corrections while in HOLDING state — the robot is already at the
+    // target and any correction would shift the DR position, which re-triggers
+    // HOLDING corrections and creates oscillation (correct → overshoot → correct → ...).
+    if (_mq->isHolding()) {
+        return;
+    }
+
     _emergencyTriggered = false;
 
     // --- Timestamp Validation ---
