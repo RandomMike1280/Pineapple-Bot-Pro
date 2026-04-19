@@ -45,11 +45,11 @@
 #define MOTOR_STOP_THRESHOLD     35       // Below this duty, motors stall
 
 // Kickstart: briefly boost duty to overcome static friction
-#define KICKSTART_FRAMES        3
+#define KICKSTART_FRAMES        9         // 3x at 1kHz (was 3 at 333Hz, ~9ms kickstart)
 #define KICKSTART_SPEED         70.0
 
-// Acceleration ramp
-#define RAMP_DURATION_MS        75      // ms to reach full speed from start
+// Acceleration ramp — RAMP_DURATION_MS stays at 75ms physical time
+#define RAMP_DURATION_MS        75         // ms to reach full speed from start
 #define RAMP_START_FRACTION     0.15f   // initial duty fraction (just enough to overcome friction)
 
 // ============================================================================
@@ -146,17 +146,17 @@
 // the robot is likely stalled or slipping.  Boost command to break free.
 #define SLIP_CMD_SPEED_THRESH_MM_S  20.0f  // min commanded speed to monitor slip (raised from 15)
 #define SLIP_OBS_SPEED_THRESH_MM_S   5.0f  // observed speed below this = stalled
-#define SLIP_DETECT_TICKS           25     // consecutive ticks to confirm stall (~75ms at 333Hz)
+#define SLIP_DETECT_TICKS           75      // 75ms physical time equivalent (was 25 at 333Hz)
 #define SLIP_BOOST_FACTOR            1.35f // multiplicative boost when stall detected
-#define SLIP_BOOST_MAX_TICKS        40     // max ticks to apply boost before giving up
+#define SLIP_BOOST_MAX_TICKS        100     // 100ms physical time equivalent (was 40 at 333Hz)
 
 // ============================================================================
 // === Timing ===
 // ============================================================================
 #define STATUS_INTERVAL_MS       100      // telemetry broadcast interval
-#define HELLO_INTERVAL_MS        3000     // auto-discovery interval
+#define HELLO_INTERVAL_MS        3000    // auto-discovery interval
 #define PING_INTERVAL_MS         500      // RTT measurement interval
-#define CONTROL_LOOP_INTERVAL_MS  3        // main loop target period (~333 Hz)
+#define CONTROL_LOOP_INTERVAL_MS 1        // main loop target period (1kHz — 3× faster than 333Hz)
 #define DONE_FEEDBACK_BLINKS     4        // number of LED blinks on DONE command
 
 // ============================================================================
@@ -175,13 +175,13 @@
 //
 // Convention: V > 0 = forward, H > 0 = right, A > 0 = CW rotation
 
-// Brake parameters
-#define ROTATION_BRAKE_FRAMES       5
+// Brake parameters — frames scale with control rate (1kHz = 3x original 333Hz)
+#define ROTATION_BRAKE_FRAMES       15        // was 5 at 333Hz → 15ms at 1kHz
 #define ROTATION_BRAKE_DUTY         75
 #define ROTATION_BRAKE_MIN_OMEGA_DEG_S 5.0f
-#define TRANSLATION_BRAKE_FRAMES     6       // frames of reverse thrust (~18ms at 333Hz)
-#define TRANSLATION_BRAKE_DUTY      80      // reverse duty — stronger thrust to kill momentum
-#define TRANSLATION_BRAKE_MIN_SPEED_MM_S 5.0f // only brake if observed speed above this
+#define TRANSLATION_BRAKE_FRAMES     18        // was 6 at 333Hz → 18ms at 1kHz
+#define TRANSLATION_BRAKE_DUTY      80
+#define TRANSLATION_BRAKE_MIN_SPEED_MM_S 5.0f
 
 // ============================================================================
 // === Motor Physics API ===

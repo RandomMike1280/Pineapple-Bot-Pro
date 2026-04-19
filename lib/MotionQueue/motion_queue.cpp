@@ -1,6 +1,7 @@
 #include "motion_queue.hpp"
 #include <math.h>
 #include "../Rotation/Rotation.hpp"
+#include "../Common/opt_math.hpp"
 
 // ============================================================================
 // Agent Debug Logging — Serial NDJSON for long-run diagnostics
@@ -210,8 +211,7 @@ void MotionQueue::_updateVelocityEstimate(float x, float y, float dt_s) {
     }
 
     // Reject outlier spikes from camera correction jumps
-    float jumpDist = sqrtf((x - _prevPoseX) * (x - _prevPoseX) +
-                           (y - _prevPoseY) * (y - _prevPoseY));
+    float jumpDist = fastLength2(x - _prevPoseX, y - _prevPoseY);
     float maxJump = _speedFast * 3.0f * dt_s;
     _prevPoseX = x;
     _prevPoseY = y;
@@ -235,7 +235,7 @@ void MotionQueue::_updateVelocityEstimate(float x, float y, float dt_s) {
     _kalmanY.correct(y);
 
     // Stationary deadzone: kill velocity estimate noise when nearly stopped
-    float est_speed = sqrtf(_kalmanX.v * _kalmanX.v + _kalmanY.v * _kalmanY.v);
+    float est_speed = fastLength2(_kalmanX.v, _kalmanY.v);
     const float deadzoneMmS = 5.0f;
     if (est_speed < deadzoneMmS) {
         _kalmanX.v = 0.0f;
@@ -304,7 +304,7 @@ bool MotionQueue::enqueueWaypoint(float target_x, float target_y, float targetAn
     // Calculate displacement vector
     float dx = target_x - seg.start_x;
     float dy = target_y - seg.start_y;
-    float dist = sqrtf(dx * dx + dy * dy);
+    float dist = fastLength2(dx, dy);
     seg.distance_mm = (uint16_t)dist;
 
     // Calculate normalized direction vector
@@ -513,7 +513,7 @@ bool MotionQueue::enqueueVelocity(float vx_mm_s, float vy_mm_s, float omega_deg_
     seg.vx_mm_s    = vx_mm_s;
     seg.vy_mm_s    = vy_mm_s;
     seg.omega_deg_s = omega_deg_s;
-    seg.speed_mm_s  = sqrtf(vx_mm_s * vx_mm_s + vy_mm_s * vy_mm_s);
+    seg.speed_mm_s  = fastLength2(vx_mm_s, vy_mm_s);
     seg.speed_deg_s = fabsf(omega_deg_s);
 
     // Estimate target position for telemetry
@@ -635,7 +635,7 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
     } else {
         float phys_vx = _currentVx * _distFactorH;
         float phys_vy = _currentVy * _distFactorV;
-        displacement = sqrtf(phys_vx * phys_vx + phys_vy * phys_vy) * dt_s;
+        displacement = fastLength2(phys_vx, phys_vy) * dt_s;
     }
     seg.traveled_mm += displacement;
 
@@ -660,7 +660,7 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             } else {
                 if (_rotDeccelDeg > 0.001f && abs_diff < _rotDeccelDeg) {
                     float normalized = abs_diff / _rotDeccelDeg;
-                    speed_scale = cbrtf(normalized);
+                    speed_scale = fastCbrtf(normalized);
                 }
 
                 if (_closeRotApproachDeg > 0.001f && abs_diff < _closeRotApproachDeg) {
@@ -706,7 +706,7 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
         } else {
             float dx = seg.target_x - current_x;
             float dy = seg.target_y - current_y;
-            float dist_remaining = sqrtf(dx * dx + dy * dy);
+            float dist_remaining = fastLength2(dx, dy);
             // Use blended angle (DR + camera GT via EMA) for heading error.
             // Pure DR angle drifts over time; pure camera angle has 100-deg quantization
             // jumps. Blending gives smooth short-term tracking with long-term convergence.
@@ -733,7 +733,7 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             } else {
                 if (_deccelDistMm > 0.001f && dist_remaining < _deccelDistMm) {
                     float normalized = dist_remaining / _deccelDistMm;
-                    speed_scale = cbrtf(normalized);
+                    speed_scale = fastCbrtf(normalized);
                 }
 
                 if (_closeApproachDistMm > 0.001f && dist_remaining < _closeApproachDistMm) {
@@ -789,7 +789,7 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
                 if (closingSpeed > 1.0f) {
                     // Kinematic braking limit (with safety margin)
                     float effectiveDist = dist_remaining / _predictiveBrakeSafety;
-                    float vSafe = sqrtf(2.0f * _predictiveBrakeDecel * effectiveDist);
+                    float vSafe = fastSqrt(2.0f * _predictiveBrakeDecel * effectiveDist);
                     if (closingSpeed > vSafe && seg.speed_mm_s > 0.001f) {
                         float brake_scale = vSafe / seg.speed_mm_s;
                         // Don't clamp below settling band floor
@@ -809,9 +809,9 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             // applies regardless of Kalman estimates, making it more robust to
             // stale velocity signals near the target.
             if (dist_remaining > _waypointToleranceMm && _latencyAwareDecelMmS2 > 0.001f) {
-                float cmdSpd = sqrtf(_currentVx * _currentVx + _currentVy * _currentVy);
+                float cmdSpd = fastLength2(_currentVx, _currentVy);
                 if (cmdSpd > 0.001f) {
-                    float maxSafeSpeed = sqrtf(2.0f * _latencyAwareDecelMmS2 * dist_remaining);
+                    float maxSafeSpeed = fastSqrt(2.0f * _latencyAwareDecelMmS2 * dist_remaining);
                     if (cmdSpd > maxSafeSpeed) {
                         float capScale = maxSafeSpeed / cmdSpd;
                         _currentVx *= capScale;
@@ -826,7 +826,7 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             float aim_dx = dx;
             float aim_dy = dy;
             if (dist_remaining > _closeApproachDistMm) {
-                float currentObsSpeed = sqrtf(_estVx * _estVx + _estVy * _estVy);
+                float currentObsSpeed = fastLength2(_estVx, _estVy);
                 float adaptiveLookahead = _computeAdaptiveLookahead(currentObsSpeed);
                 if (adaptiveLookahead > 0.001f) {
                     float pred_x = current_x + _estVx * adaptiveLookahead;
@@ -835,7 +835,7 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
                     aim_dy = seg.target_y - pred_y;
                 }
             }
-            float aim_dist = sqrtf(aim_dx * aim_dx + aim_dy * aim_dy);
+            float aim_dist = fastLength2(aim_dx, aim_dy);
             float aim_inv = (aim_dist > 0.001f) ? (1.0f / aim_dist) : 0.0f;
 
             // --- S-Curve Profiling: jerk-limited speed ramp ---
@@ -899,7 +899,7 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             // Prevents the feedback loop: closeApproach makes speed_scale tiny, boost amplifies
             // it back up, robot overshoots, drops out of closeApproach, speed_scale drops again...
             if (!inSettlingBand && dist_remaining >= _closeApproachDistMm) {
-                float cmdSpd = sqrtf(_currentVx * _currentVx + _currentVy * _currentVy);
+                float cmdSpd = fastLength2(_currentVx, _currentVy);
                 if (cmdSpd > 0.001f && cmdSpd < _precisionMinSpeedLimitMmS) {
                     float boost = _precisionMinSpeedLimitMmS / cmdSpd;
                     _currentVx *= boost;
@@ -918,17 +918,18 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
         ? (seg.target_x - current_x) * (seg.target_x - current_x)
           + (seg.target_y - current_y) * (seg.target_y - current_y)
         : 1e6f;
-    float slipDistCheck = sqrtf(slipDistSq);
+    float slipDistCheck = fastSqrt(slipDistSq);
     // Disable slip detection when very close to target (< 5× tolerance).
     // At close range, low commanded speed naturally produces low observed speed,
     // which triggers false-positive slip detection and corrupts the velocity estimate.
     bool nearTarget = slipDistCheck < _waypointToleranceMm * 5.0f;
     if (!nearTarget && !seg.isDurationBased && slipDistCheck > _waypointToleranceMm * 4.0f) {
-        // Compare squared speeds against squared thresholds to avoid sqrtf
+        // Compare squared speeds against squared thresholds — avoids sqrt entirely
         float cmdSpeedSq = _currentVx * _currentVx + _currentVy * _currentVy;
         float obsSpeedSq = _estVx * _estVx + _estVy * _estVy;
-        float obsSpeed = sqrtf(obsSpeedSq);
-        float cmdSpeed = sqrtf(cmdSpeedSq);
+        float obsSpeed = fastSqrt(obsSpeedSq);
+        // cmdSpeed only used in debug logging — use fastSqrt there
+        float cmdSpeed = fastSqrt(cmdSpeedSq);
 
         if (cmdSpeedSq > _slipCmdThresh * _slipCmdThresh && obsSpeedSq < _slipObsThresh * _slipObsThresh) {
             _slipCounter++;
@@ -968,12 +969,12 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
         } else {
             float dx = seg.target_x - current_x;
             float dy = seg.target_y - current_y;
-            float dist_remaining = sqrtf(dx * dx + dy * dy);
+            float dist_remaining = fastLength2(dx, dy);
 
             // --- PREDICTIVE COMPLETION CHECK ---
             float heading_err = (Rotation(seg.target_angle) - Rotation(current_angle));
 
-            float obsSpd = sqrtf(_estVx * _estVx + _estVy * _estVy);
+            float obsSpd = fastLength2(_estVx, _estVy);
             
             // Compute stopping distance: d = v^2/(2*a)
             float stoppingDist = 0.0f;
@@ -1031,7 +1032,7 @@ bool MotionQueue::tick(uint32_t dt_ms, float current_x, float current_y, float c
             float dx = seg.target_x - current_x;
             float dy = seg.target_y - current_y;
             float heading_err = (Rotation(seg.target_angle) - Rotation(current_angle));
-            withinTol = (sqrtf(dx * dx + dy * dy) <= _waypointToleranceMm &&
+            withinTol = (fastLength2(dx, dy) <= _waypointToleranceMm &&
                          fabsf(heading_err) <= _rotToleranceDeg);
         }
 
@@ -1163,7 +1164,7 @@ void MotionQueue::debugLogWiggle(float current_x, float current_y, float current
 
     float dx = seg.target_x - current_x;
     float dy = seg.target_y - current_y;
-    float dist_remaining = sqrtf(dx * dx + dy * dy);
+    float dist_remaining = fastLength2(dx, dy);
     if (dist_remaining > 250.0f) return;  // only log near target
 
     float heading_err = (Rotation(seg.target_angle) - Rotation(current_angle));
@@ -1182,7 +1183,7 @@ void MotionQueue::debugLogWiggle(float current_x, float current_y, float current
         }
     } else {
         if (_deccelDistMm > 0.001f && dist_remaining < _deccelDistMm) {
-            speed_scale = cbrtf(dist_remaining / _deccelDistMm);
+            speed_scale = fastCbrtf(dist_remaining / _deccelDistMm);
         }
         if (_closeApproachDistMm > 0.001f && dist_remaining < _closeApproachDistMm) {
             float close_norm = dist_remaining / _closeApproachDistMm;
@@ -1207,7 +1208,7 @@ void MotionQueue::debugLogWiggle(float current_x, float current_y, float current
         }
     }
 
-    float cmdSpd = sqrtf(_currentVx * _currentVx + _currentVy * _currentVy);
+    float cmdSpd = fastLength2(_currentVx, _currentVy);
     Serial.printf("[WIG] dist=%.1f ss=%.3f cmdVx=%.2f cmdVy=%.2f cmdSpd=%.2f close=%.0f settle=%d antiStall=%d\n",
         dist_remaining, speed_scale, _currentVx, _currentVy, cmdSpd,
         _closeApproachDistMm, inSettlingBand,

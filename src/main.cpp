@@ -21,6 +21,7 @@
 #include <udp_protocol.hpp>
 #include <servo_control.hpp>
 #include <udp_logger.hpp>
+#include <opt_math.hpp>
 
 // ============================================================================
 // WiFi Configuration
@@ -154,8 +155,8 @@ MecanumSpeeds computeMecanumSpeeds(double V, double H, double A, bool lowSpeedMo
         // If observed speed > 0, motors are already moving and don't need a boost.
         float estVx, estVy;
         motionQueue.getEstimatedVelocity(estVx, estVy);
-        float estSpeed = sqrtf(estVx * estVx + estVy * estVy);
-        float cmdSpeed = sqrtf(V * V + H * H);
+        float estSpeed = fastLength2(estVx, estVy);
+        float cmdSpeed = fastLength2(V, H);
         bool motorsStalled = (cmdSpeed > 0.05f && estSpeed < 1.5f);
 
         for (int i = 0; i < 4; i++) {
@@ -234,7 +235,7 @@ MecanumSpeeds computeMecanumSpeeds(double V, double H, double A, bool lowSpeedMo
     {
         static unsigned long lastBalLogMs = 0;
         if (millis() - lastBalLogMs >= 100) {
-            float cmdSpd = sqrtf(V * V + H * H);
+            float cmdSpd = fastLength2(V, H);
             // Only log when V or H is small (near target / precision mode)
             if (cmdSpd < 0.3f && cmdSpd > 0.001f) {
                 // Compute raw speeds before balance
@@ -267,7 +268,7 @@ MecanumSpeeds computeSingleMotorSpeeds(double V, double H) {
     //   M3(BL):  vx=+1, vy=+1   (backward-left quadrant)
     //   M4(FL):  vx=+1, vy=-1   (forward-left quadrant)
     
-    float desiredSpeed = sqrtf(V * V + H * H);
+    float desiredSpeed = fastLength2(V, H);
     if (desiredSpeed < 0.001f) return s;  // no movement requested
     
     // Normalize direction vector
@@ -354,8 +355,8 @@ static void resetMotionControlState(bool suppressBrake) {
 
 static MecanumSpeeds computeBrakeDuty(float brakeDirX, float brakeDirY,
                                       float headingAngle, int brakeDuty) {
-    double cosA = cos(headingAngle);
-    double sinA = sin(headingAngle);
+    float cosA = fastCos(headingAngle);
+    float sinA = fastSin(headingAngle);
     double bV = -(brakeDirX * cosA + brakeDirY * sinA);
     double bH = -(brakeDirX * sinA - brakeDirY * cosA);
     double scale = (double)brakeDuty / (double)DRIVE_CLAMP_HIGH;
@@ -395,7 +396,7 @@ static bool detectAndStartTranslationBrake() {
         translationBrakeFrames == 0 && !suppressRotationBrake) {
         float estVx, estVy;
         motionQueue.getEstimatedVelocity(estVx, estVy);
-        float obsSpeed = sqrtf(estVx * estVx + estVy * estVy);
+        float obsSpeed = fastLength2(estVx, estVy);
         if (obsSpeed >= TRANSLATION_BRAKE_MIN_SPEED_MM_S) {
             translationBrakeFrames = TRANSLATION_BRAKE_FRAMES;
             translationBrakeDirX = estVx / obsSpeed;
@@ -437,7 +438,7 @@ static void detectOperatingMode(const MotionSegment* seg, float cmdMag, float cx
     if (seg && seg->state == SegmentState::ACTIVE) {
         float dx = seg->target_x - cx;
         float dy = seg->target_y - cy;
-        float distRemaining = sqrtf(dx * dx + dy * dy);
+        float distRemaining = fastLength2(dx, dy);
 
         logger.update("DEBUG", "DIST_CHECK: dist=%.2f cmdMag=%.3f", distRemaining, cmdMag);
 
@@ -469,9 +470,9 @@ static void computeHeadingVelocities(float vx, float vy, float omega,
     double V_out = 0, H_out = 0;
 
     if (SPEED_FAST_MM_S > 0.1f) {
-        double headingRad = c_angle * (PI / 180.0f);
-        double cosA = cos(headingRad);
-        double sinA = sin(headingRad);
+        float headingRad = c_angle * (PI / 180.0f);
+        float cosA = fastCos(headingRad);
+        float sinA = fastSin(headingRad);
         V_out = (vx * cosA + vy * sinA) / SPEED_FAST_MM_S;
         H_out = (vx * sinA - vy * cosA) / SPEED_FAST_MM_S;
     }
@@ -480,7 +481,7 @@ static void computeHeadingVelocities(float vx, float vy, float omega,
     H_out *= motorRampFactor;
 
     // Mecanum H axis is naturally faster by √2 — normalize to match V
-    H_out /= sqrt(2.0);
+    H_out *= 0.707106781f;  // 1/sqrt(2)
 
     // Drift trim: pre-rotate (V, H) to counteract systematic lateral bias
     {
@@ -495,8 +496,8 @@ static void computeHeadingVelocities(float vx, float vy, float omega,
         }
         if (trim_deg != 0) {
             float trim_rad = trim_deg * (PI / 180.0f);
-            float cosT = cosf(trim_rad);
-            float sinT = sinf(trim_rad);
+            float cosT = fastCos(trim_rad);
+            float sinT = fastSin(trim_rad);
             double H2 = H_out * cosT - V_out * sinT;
             double V2 = H_out * sinT + V_out * cosT;
             V_out = V2;
@@ -513,9 +514,9 @@ static void computeHeadingVelocities(float vx, float vy, float omega,
     float ffVx, ffVy, ffOmega;
     motionQueue.getFeedforward(ffVx, ffVy, ffOmega);
     if (SPEED_FAST_MM_S > 0.1f) {
-        double headingRad = c_angle * (PI / 180.0f);
-        double cosA = cos(headingRad);
-        double sinA = sin(headingRad);
+        float headingRad = c_angle * (PI / 180.0f);
+        float cosA = fastCos(headingRad);
+        float sinA = fastSin(headingRad);
         V_out += (ffVx * cosA - ffVy * sinA) / SPEED_FAST_MM_S;
         H_out += (ffVx * sinA + ffVy * cosA) / SPEED_FAST_MM_S;
     }
@@ -663,7 +664,7 @@ void applyMotors() {
                 heading_err = (Rotation(seg->target_angle) - Rotation(stable_angle));
                 float dx = seg->target_x - cx;
                 float dy = seg->target_y - cy;
-                dist_rem = sqrtf(dx*dx + dy*dy);
+                dist_rem = fastLength2(dx, dy);
             }
             float gtAngle = latencyComp.getLastObservedAngle();
             logger.update("STAB", "err=%.1f omega=%.1f A=%.3f dist=%.1f V=%.2f H:%.2f gt=%.1f",
@@ -674,7 +675,7 @@ void applyMotors() {
     // #endregion
 
     // --- Detect operating mode ---
-    float cmdMag = sqrtf(vx * vx + vy * vy);
+    float cmdMag = fastLength2(vx, vy);
     bool lowSpeedMode = (cmdMag > 0.001f && cmdMag < 10.0f);
     bool precisionMode = false;
     bool singleMotorMode = false;
@@ -1241,8 +1242,8 @@ void loop() {
             deadReckoning.getAnchor(ax, ay);
             float odoX, odoY, odoAngle;
             deadReckoning.getOdoPosition(odoX, odoY, odoAngle);
-            float odoMag = sqrtf(odoX*odoX + odoY*odoY);
-            float anchorMag = sqrtf(ax*ax + ay*ay);
+            float odoMag = fastLength2(odoX, odoY);
+            float anchorMag = fastLength2(ax, ay);
             Serial.printf(
                 "{\"sessionId\":\"eb5734\",\"id\":\"main_%lu\",\"timestamp\":%lu,"
                 "\"location\":\"main.cpp:loop\",\"message\":\"H3_motor_ramp_state\",\"hypothesisId\":\"H3\","

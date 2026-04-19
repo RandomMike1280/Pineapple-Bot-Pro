@@ -5,7 +5,7 @@ This document outlines the firmware architecture and control approach for the Ne
 ## 1. System Overview
 The robot is controlled by an ESP32-S3 microcontroller using an asymmetric dual-core architecture:
 - **Core 0 (Network & Parsing):** Handles Wi-Fi, asynchronous UDP receiving, and telemetry broadcasting. It runs asynchronously, typically processing network events and sending `STATUS` messages at 10 Hz (`100ms` intervals).
-- **Core 1 (Motion & Kinematics):** Dedicated to the high-frequency motor control loop, running at a rigid target of ~333 Hz (`3ms` interval). It handles motion queue processing, trajectory profiling, and dead-reckoning integration.
+- **Core 1 (Motion & Kinematics):** Dedicated to the high-frequency motor control loop, running at a rigid target of **1000 Hz** (`1ms` interval). It handles motion queue processing, trajectory profiling, and dead-reckoning integration.
 
 State synchronization between cores is strictly managed via a FreeRTOS mutex (`stateMutex`).
 
@@ -25,11 +25,14 @@ The robot is remote-controlled via a custom UDP protocol using short ASCII strin
 - `C`: Camera position updates from the phone.
 - `P` / `Q`: Ping / Pong for measuring network RTT and clock synchronization.
 - `E`: Execute standalone Servo Action (Supports complex sequencing like `LOWER_LEFT`, `LOWER_RIGHT`, `UPPER_LEFT`, `UPPER_RIGHT`, and discrete primitives like `GRABBER_LEFT`, `GRABBER_RIGHT`, `GRABBER_CENTER`, `SLIDER_UP`, `ARM_DOWN`, etc.).
-- `U`: Set Serial Monitor (`U:<0|1>`). Opt-in to stream asynchronous debug logs (`L` messages) back to the phone.
-- `X`: Mission sequence DONE signal. Triggers a visual 4-blink LED feedback sequence on the robot.
+- `U`: Set Serial Monitor (`U:<0|1>`). Opt-in to stream asynchronous debug logs (`L` messages) back to the phone. When enabled, the robot emits high-frequency `[MOTORS]` and `[BAL]` diagnostics.
+- `X`: Mission sequence DONE signal. Triggers a visual **4-blink** LED feedback sequence on the robot.
 - `A`: Immediate emergency stop (ABORT).
 
-Telemetry is sent periodically back to the phone via `STATUS` messages (`S:y:x:angle:qLen:drift`), where `x` and `y` are swapped to match the phone's local coordinate system. Additionally, if the Serial Monitor is enabled via the `U` command, the robot streams asynchronous `L` (Log) messages containing live debugging strings and system state right to the phone interface. Log messages use the type prefix `L:<S|U|I>` where `S` is Static, `U` is Update-in-place, and `I` is Important (Red).
+Telemetry is sent periodically back to the phone via `STATUS` messages (`S:y:x:angle:qLen:drift:vy:vx`), where `x` and `y` are swapped to match the phone's local coordinate system, and `vx`/`vy` are the current estimated velocities in mm/s. Additionally, if the Serial Monitor is enabled via the `U` command, the robot streams asynchronous `L` (Log) messages containing live debugging strings and system state right to the phone interface. Log messages use the type prefix `L:<subtype>[:<id>]:<msg>` where subtypes include:
+- `S` (Static): Standard one-off log entries.
+- `U` (Update): Update-in-place logs (identified by `:id`) for high-frequency telemetry like PWM values or PID errors.
+- `I` (Important): Highlighted logs (rendered in Red on the phone) for critical state changes or errors.
 
 ## 3. Motion Queue and Trajectory Profiling
 The `MotionQueue` subsystem receives high-level commands and sequences them into `MotionSegment` objects.
@@ -38,26 +41,26 @@ The `MotionQueue` subsystem receives high-level commands and sequences them into
 - **Adaptive Lookahead:** Instead of a fixed lookahead, the steering algorithm utilizes an adaptive lookahead ($0.04\text{s}$ to $0.18\text{s}$) that scales with current speed ($lookahead = BASE + speed \times GAIN$). This compensates for momentum more aggressively at high speeds while maintaining stability during slow maneuvers.
 - **Predictive Braking:** The queue implements a physics-based overshoot prevention mechanism. It computes the maximum safe entry speed ($v_{safe} = \sqrt{2 \cdot a \cdot d}$) for the remaining distance $d$, assuming a $350\text{ mm/s}^2$ deceleration capability ($a$) and a $1.2\text{x}$ safety margin. If the closing speed exceeds $v_{safe}$, the velocity scale is proactively reduced.
 - **Latency-Aware Speed Governor:** To counter network latency staleness (where a "stop" command from the phone may arrive ~150ms late), the robot enforces a hard upper bound on commanded speed. It ensures the robot can always stop within the remaining distance $d$ assuming a $300\text{ mm/s}^2$ latency-aware deceleration capability ($v_{cap} = \sqrt{2 \cdot 300 \cdot d}$).
-- **Blended Angle Stabilization:** To prevent "strafe-jumps" or oscillations during heading correction, the motion controller uses a **Blended Angle**. This combines the high-frequency internal Dead-Reckoning angle with the low-frequency Camera Ground-Truth angle, providing a smooth but authoritative heading reference for the PID stabilization loop.
+- **Blended Angle Stabilization:** To prevent "strafe-jumps" or oscillations during heading correction, the motion controller uses a **Blended Angle**. This combines the high-frequency internal Dead-Reckoning angle with the low-frequency Camera Ground-Truth angle, providing a smooth but authoritative heading reference for the PID stabilization loop and **heading-frame velocity transforms**. This ensures that corrections from the tracker don't translate into jerky lateral movements.
 
 ## 4. Motor Kinematics and Actuation
 The robot employs a four-wheel Mecanum drive.
 - **Torque Balancing & Calibration:** The ESP32's PWM duties are scaled linearly against calibrated ranges (`duty = v * 43.017 + 57.165`) to bypass hardware dead-zones. To compensate for physical torque imbalance, right-side motors (M1, M4) have their duty reduced by a fixed `-3.0` offset, ensuring straight-line travel.
-- **Kickstart:** To overcome static friction, an immediate power boost (duty `70`) is applied across `3` frames (~9ms) whenever a motor abruptly breaks static hold.
+- **Kickstart:** To overcome static friction, an immediate power boost (duty `70`) is applied across **9** frames (~9ms at 1kHz) whenever a motor abruptly breaks static hold.
 - **Operating Modes:**
-  - *Precision Mode:* When `< 50mm` from a target, the robot enters precision mode. It utilizes **Induction Kickstart**—a conditional boost applied only if the motor is stalled (commanded speed $> 0.05$ while observed speed $< 1.5\text{ mm/s}$), preventing unnecessary wiggle during fine adjustments.
+  - *Precision Mode:* When `< 50mm` from a target, the robot enters precision mode. It utilizes **Induction Kickstart**—a conditional boost (duty `+15`) applied only if the motor is stalled (commanded speed $> 0.05$ while observed speed $< 1.5\text{ mm/s}$), preventing unnecessary wiggle during fine adjustments. If the robot is already moving, the boost is suppressed to maintain smooth docking.
   - *Settling Band:* For the final $20\text{mm}$ of an approach, the firmware switches from a fixed duty floor to a linear ramp-to-zero.
-  - *Single-Motor Mode (Micro-steps):* When `< 15mm` from a target and moving slowly ($< 10\text{ mm/s}$), the robot activates **Single-Motor Mode**. It fires only the one wheel most optimally aligned with the desired velocity vector. This enables extreme micro-adjustments (~1-2mm) without overshooting or rotating.
+  - *Single-Motor Mode (Micro-steps):* When `< 15mm` from a target and moving slowly ($< 10\text{ mm/s}$), the robot activates **Single-Motor Mode**. It uses a **Dot-Product Alignment** algorithm to identify the one wheel most optimally aligned with the desired velocity vector. Firing only this motor enables extreme micro-adjustments (~1-2mm) without overshooting or introducing parasitic rotation.
 - **Anti-Slip / Stall Detection:** If the observed velocity falls below `5 mm/s` while the commanded speed remains over `20 mm/s` for 25 control ticks (~75ms), the firmware detects a stall. It applies a `1.35x` multiplicative power boost to break free.
 - **Active Braking (Reverse Thrust):** When a motion segment ends, the robot applies active reverse thrust (Reverse PWM) to kill momentum:
-  - *Rotation:* Reverse duty `75` for `5` frames (~15ms).
-  - *Translation:* Reverse duty `80` for `6` frames (~18ms), only if observed speed is $> 5\text{ mm/s}$.
+  - *Rotation:* Reverse duty `75` for **15ms** (15 control ticks).
+  - *Translation:* Reverse duty `80` for **18ms** (18 control ticks), only if observed speed is $> 5\text{ mm/s}$.
 - **Drift Trim:** The translation outputs are pre-rotated slightly to counteract hardware skew (e.g., $9.36^\circ$ for `SLOW` mode).
 
 ## 5. Dead Reckoning and Latency-Compensated Vision
 Rather than reacting abruptly to real-time observations, the system relies fundamentally on internal Dead-Reckoning, corrected smoothly by sporadic vision updates from an external tracker (an Android phone).
 
-1. **Dead Reckoning (`DeadReckoning`)**: Integrates commanded and estimated velocities at each control loop interval (3ms) to confidently track position. A 1D Kalman Filter (per axis, Process Noise: `0.5` Pos / `50.0` Vel) fuses raw motor velocity vectors to reject anomalies. Dead-reckoning for horizontal strafing is calibrated with a $1.25$ factor, while vertical motion uses $1.0$. A **Stationary Deadzone** of $5.0\text{ mm/s}$ is applied to the Kalman velocity estimate to ensure it zero-centers correctly near the target, preventing stale velocity signals from influencing the braking logic.
+1. **Dead Reckoning (`DeadReckoning`)**: Integrates commanded and estimated velocities at each control loop interval (**1ms**) to confidently track position. A 1D Kalman Filter (per axis, Process Noise: `0.5` Pos / `50.0` Vel) fuses raw motor velocity vectors to reject anomalies. Dead-reckoning for horizontal strafing is calibrated with a $1.25$ factor, while vertical motion uses $1.0$. A **Stationary Deadzone** of $5.0\text{ mm/s}$ is applied to the Kalman velocity estimate to ensure it zero-centers correctly near the target, preventing stale velocity signals from influencing the braking logic. Additionally, world-frame acceleration feedforward is projected into the robot's heading frame using an **Inverse Rotation Transform** to precisely pre-compensate for inertia.
 2. **Clock Offset (`PING`/`PONG`)**: The robot evaluates precise ping RTTs every `500ms` against the phone to synchronize its event timeline down to the millisecond.
 3. **Latency Compensation (`LatencyCompensator`)**: 
    - When a camera update (`CAM`) arrives, it is predictably assumed to bear an inherent ~`150ms` processing/network latency.
