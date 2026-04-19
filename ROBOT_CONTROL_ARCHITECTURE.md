@@ -24,12 +24,12 @@ The robot is remote-controlled via a custom UDP protocol using short ASCII strin
 - `V`: Direct velocity control (`vx`, `vy`, `omega`) with a timeout.
 - `C`: Camera position updates from the phone.
 - `P` / `Q`: Ping / Pong for measuring network RTT and clock synchronization.
-- `E`: Execute standalone Servo Action (Supports complex sequencing like `LOWER_LEFT`, `LOWER_RIGHT`, `UPPER_LEFT`, `UPPER_RIGHT`, and discrete primitives like `GRABBER_LEFT`, `GRABBER_RIGHT`, `GRABBER_CENTER`, `SLIDER_UP`, `ARM_DOWN`, etc.).
+- `E`: Execute standalone Servo Action (Supports complex sequencing like `LOWER_LEFT`, `LOWER_RIGHT`, `UPPER_LEFT`, `UPPER_RIGHT`, and discrete primitives like `GRABBER_LEFT`, `GRABBER_RIGHT`, `GRABBER_CENTER`, `SLIDER_UP`, `SLIDER_DOWN`, `ARM_DOWN`, `ARM_UP`, `FRUIT`, `DROPPER_OPEN/CLOSE`, `CEIL_OPEN/CLOSE/WATER`).
 - `U`: Set Serial Monitor (`U:<0|1>`). Opt-in to stream asynchronous debug logs (`L` messages) back to the phone. When enabled, the robot emits high-frequency `[MOTORS]` and `[BAL]` diagnostics.
 - `X`: Mission sequence DONE signal. Triggers a visual **4-blink** LED feedback sequence on the robot.
 - `A`: Immediate emergency stop (ABORT).
 
-Telemetry is sent periodically back to the phone via `STATUS` messages (`S:y:x:angle:qLen:drift:vy:vx`), where `x` and `y` are swapped to match the phone's local coordinate system, and `vx`/`vy` are the current estimated velocities in mm/s. Additionally, if the Serial Monitor is enabled via the `U` command, the robot streams asynchronous `L` (Log) messages containing live debugging strings and system state right to the phone interface. Log messages use the type prefix `L:<subtype>[:<id>]:<msg>` where subtypes include:
+Telemetry is sent periodically back to the phone via `STATUS` messages (`S:y:x:angle:qLen:drift`), where `y` and `x` are swapped to match the phone's local coordinate system (Phone Y → Robot X, Phone X → Robot Y). Additionally, if the Serial Monitor is enabled via the `U` command, the robot streams asynchronous `L` (Log) messages containing live debugging strings and system state right to the phone interface. Log messages use the type prefix `L:<subtype>[:<id>]:<msg>` where subtypes include:
 - `S` (Static): Standard one-off log entries.
 - `U` (Update): Update-in-place logs (identified by `:id`) for high-frequency telemetry like PWM values or PID errors.
 - `I` (Important): Highlighted logs (rendered in Red on the phone) for critical state changes or errors.
@@ -46,12 +46,12 @@ The `MotionQueue` subsystem receives high-level commands and sequences them into
 ## 4. Motor Kinematics and Actuation
 The robot employs a four-wheel Mecanum drive.
 - **Torque Balancing & Calibration:** The ESP32's PWM duties are scaled linearly against calibrated ranges (`duty = v * 43.017 + 57.165`) to bypass hardware dead-zones. To compensate for physical torque imbalance, right-side motors (M1, M4) have their duty reduced by a fixed `-3.0` offset, ensuring straight-line travel.
-- **Kickstart:** To overcome static friction, an immediate power boost (duty `70`) is applied across **9** frames (~9ms at 1kHz) whenever a motor abruptly breaks static hold.
+- **Kickstart:** To overcome static friction, an immediate power boost (duty `70`) is applied across **3** frames (~3ms at 1kHz) whenever a motor abruptly breaks static hold.
 - **Operating Modes:**
   - *Precision Mode:* When `< 50mm` from a target, the robot enters precision mode. It utilizes **Induction Kickstart**—a conditional boost (duty `+15`) applied only if the motor is stalled (commanded speed $> 0.05$ while observed speed $< 1.5\text{ mm/s}$), preventing unnecessary wiggle during fine adjustments. If the robot is already moving, the boost is suppressed to maintain smooth docking.
   - *Settling Band:* For the final $20\text{mm}$ of an approach, the firmware switches from a fixed duty floor to a linear ramp-to-zero.
   - *Single-Motor Mode (Micro-steps):* When `< 15mm` from a target and moving slowly ($< 10\text{ mm/s}$), the robot activates **Single-Motor Mode**. It uses a **Dot-Product Alignment** algorithm to identify the one wheel most optimally aligned with the desired velocity vector. Firing only this motor enables extreme micro-adjustments (~1-2mm) without overshooting or introducing parasitic rotation.
-- **Anti-Slip / Stall Detection:** If the observed velocity falls below `5 mm/s` while the commanded speed remains over `20 mm/s` for 25 control ticks (~75ms), the firmware detects a stall. It applies a `1.35x` multiplicative power boost to break free.
+- **Anti-Slip / Stall Detection:** If the observed velocity falls below `5 mm/s` while the commanded speed remains over `20 mm/s` for 75 control ticks (~75ms), the firmware detects a stall. It applies a `1.35x` multiplicative power boost to break free.
 - **Active Braking (Reverse Thrust):** When a motion segment ends, the robot applies active reverse thrust (Reverse PWM) to kill momentum:
   - *Rotation:* Reverse duty `75` for **15ms** (15 control ticks).
   - *Translation:* Reverse duty `80` for **18ms** (18 control ticks), only if observed speed is $> 5\text{ mm/s}$.

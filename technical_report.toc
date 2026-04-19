@@ -1,0 +1,72 @@
+\babel@toc {english}{}\relax 
+\contentsline {section}{\numberline {1}Abstract}{3}{section.1}%
+\contentsline {section}{\numberline {2}Introduction}{3}{section.2}%
+\contentsline {subsection}{\numberline {2.1}Competition Context}{3}{subsection.2.1}%
+\contentsline {subsection}{\numberline {2.2}System Overview}{3}{subsection.2.2}%
+\contentsline {subsection}{\numberline {2.3}Design Philosophy}{4}{subsection.2.3}%
+\contentsline {section}{\numberline {3}Hardware Platform}{5}{section.3}%
+\contentsline {subsection}{\numberline {3.1}Microcontroller}{5}{subsection.3.1}%
+\contentsline {subsection}{\numberline {3.2}Drive System}{5}{subsection.3.2}%
+\contentsline {subsection}{\numberline {3.3}Servo Actuators}{5}{subsection.3.3}%
+\contentsline {subsection}{\numberline {3.4}Communication Hardware}{6}{subsection.3.4}%
+\contentsline {subsection}{\numberline {3.5}External Vision System}{6}{subsection.3.5}%
+\contentsline {subsection}{\numberline {3.6}Physical Specifications}{6}{subsection.3.6}%
+\contentsline {section}{\numberline {4}Firmware Architecture}{7}{section.4}%
+\contentsline {subsection}{\numberline {4.1}Asymmetric Dual-Core Design}{7}{subsection.4.1}%
+\contentsline {subsection}{\numberline {4.2}Multi-Robot Configuration System}{8}{subsection.4.2}%
+\contentsline {subsection}{\numberline {4.3}Subsystem Library Architecture}{8}{subsection.4.3}%
+\contentsline {section}{\numberline {5}Communication Protocol}{8}{section.5}%
+\contentsline {subsection}{\numberline {5.1}Design Rationale}{8}{subsection.5.1}%
+\contentsline {subsection}{\numberline {5.2}Protocol Messages}{9}{subsection.5.2}%
+\contentsline {subsection}{\numberline {5.3}Coordinate System Convention}{9}{subsection.5.3}%
+\contentsline {subsection}{\numberline {5.4}Waypoint Deduplication}{10}{subsection.5.4}%
+\contentsline {subsection}{\numberline {5.5}Remote Logging System}{10}{subsection.5.5}%
+\contentsline {section}{\numberline {6}Motion Control and Trajectory Planning}{10}{section.6}%
+\contentsline {subsection}{\numberline {6.1}Motion Queue Architecture}{10}{subsection.6.1}%
+\contentsline {subsection}{\numberline {6.2}Coasting Bridge}{11}{subsection.6.2}%
+\contentsline {subsection}{\numberline {6.3}S-Curve Trajectory Profiling}{11}{subsection.6.3}%
+\contentsline {subsection}{\numberline {6.4}Velocity and Acceleration Feedforward}{12}{subsection.6.4}%
+\contentsline {subsection}{\numberline {6.5}Adaptive Lookahead}{12}{subsection.6.5}%
+\contentsline {subsection}{\numberline {6.6}Predictive Braking}{13}{subsection.6.6}%
+\contentsline {subsection}{\numberline {6.7}Latency-Aware Speed Governor}{13}{subsection.6.7}%
+\contentsline {subsection}{\numberline {6.8}Blended Angle Stabilization}{13}{subsection.6.8}%
+\contentsline {section}{\numberline {7}Motor Kinematics and Actuation}{14}{section.7}%
+\contentsline {subsection}{\numberline {7.1}Mecanum Drive Model}{14}{subsection.7.1}%
+\contentsline {subsection}{\numberline {7.2}Dead Zone Compensation and Linear Calibration}{14}{subsection.7.2}%
+\contentsline {subsection}{\numberline {7.3}Torque Balancing}{14}{subsection.7.3}%
+\contentsline {subsection}{\numberline {7.4}Kickstart Mechanism}{15}{subsection.7.4}%
+\contentsline {subsection}{\numberline {7.5}Operating Modes}{15}{subsection.7.5}%
+\contentsline {subsubsection}{\numberline {7.5.1}Normal Mode ($> \SI {50}{\milli \metre }$ from target)}{15}{subsubsection.7.5.1}%
+\contentsline {subsubsection}{\numberline {7.5.2}Precision Mode ($< \SI {50}{\milli \metre }$ from target)}{15}{subsubsection.7.5.2}%
+\contentsline {subsubsection}{\numberline {7.5.3}Single-Motor Mode ($< \SI {15}{\milli \metre }$ from target, $< \SI {10}{mm/s}$)}{15}{subsubsection.7.5.3}%
+\contentsline {subsection}{\numberline {7.6}Anti-Slip and Stall Detection}{16}{subsection.7.6}%
+\contentsline {subsection}{\numberline {7.7}Active Braking (Reverse Thrust)}{16}{subsection.7.7}%
+\contentsline {subsection}{\numberline {7.8}Drift Trim}{17}{subsection.7.8}%
+\contentsline {subsection}{\numberline {7.9}Motor Duty Normalization}{17}{subsection.7.9}%
+\contentsline {section}{\numberline {8}Dead Reckoning and Latency-Compensated Vision}{17}{section.8}%
+\contentsline {subsection}{\numberline {8.1}Dead Reckoning Engine}{17}{subsection.8.1}%
+\contentsline {subsubsection}{\numberline {8.1.1}Distance Calibration}{17}{subsubsection.8.1.1}%
+\contentsline {subsubsection}{\numberline {8.1.2}EMA-Smoothed Velocity for Integration}{18}{subsubsection.8.1.2}%
+\contentsline {subsubsection}{\numberline {8.1.3}Position History Ring Buffer}{18}{subsubsection.8.1.3}%
+\contentsline {subsection}{\numberline {8.2}Kalman-Filtered Velocity Estimation}{18}{subsection.8.2}%
+\contentsline {subsection}{\numberline {8.3}Clock Synchronization}{18}{subsection.8.3}%
+\contentsline {subsection}{\numberline {8.4}Latency-Compensated Vision}{19}{subsection.8.4}%
+\contentsline {subsection}{\numberline {8.5}Heading Authority}{20}{subsection.8.5}%
+\contentsline {section}{\numberline {9}Android Controller Application}{20}{section.9}%
+\contentsline {subsection}{\numberline {9.1}Architecture Overview}{20}{subsection.9.1}%
+\contentsline {subsection}{\numberline {9.2}Vision Pipeline}{20}{subsection.9.2}%
+\contentsline {subsection}{\numberline {9.3}Robot Discovery and Connection}{21}{subsection.9.3}%
+\contentsline {subsection}{\numberline {9.4}Tap-Target Navigation}{22}{subsection.9.4}%
+\contentsline {subsection}{\numberline {9.5}Path Sequencer (Continuous Motion Controller)}{22}{subsection.9.5}%
+\contentsline {subsection}{\numberline {9.6}Graph-Based Path Editor}{22}{subsection.9.6}%
+\contentsline {section}{\numberline {10}Integrated Control Flow}{23}{section.10}%
+\contentsline {section}{\numberline {11}S-Curve Tuning Strategy Across Robot Configurations}{24}{section.11}%
+\contentsline {section}{\numberline {12}Speed Profiles and Operational Parameters}{24}{section.12}%
+\contentsline {subsection}{\numberline {12.1}Precision Thresholds}{25}{subsection.12.1}%
+\contentsline {section}{\numberline {13}Discussion}{25}{section.13}%
+\contentsline {subsection}{\numberline {13.1}Novel Contributions}{25}{subsection.13.1}%
+\contentsline {subsection}{\numberline {13.2}Limitations and Future Work}{26}{subsection.13.2}%
+\contentsline {section}{\numberline {14}Conclusion}{26}{section.14}%
+\contentsline {section}{\numberline {A}Configuration Defaults Reference}{29}{appendix.A}%
+\contentsline {section}{\numberline {B}UDP Protocol Message Formats}{30}{appendix.B}%
+\contentsline {section}{\numberline {C}Servo Action Reference}{30}{appendix.C}%
