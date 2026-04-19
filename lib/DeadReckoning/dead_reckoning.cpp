@@ -1,5 +1,6 @@
 #include "dead_reckoning.hpp"
 #include <math.h>
+#include "../Common/opt_math.hpp"
 
 // ============================================================================
 // Agent Debug Logging — Serial NDJSON for long-run diagnostics
@@ -18,8 +19,8 @@ static void _dbgLogDRFloat(float ix, float iy, float ax, float ay) {
         "\"data\":{\"ix\":%.1f,\"iy\":%.1f,\"ax\":%.1f,\"ay\":%.1f,"
         "\"odo_mag\":%.1f,\"anchor_mag\":%.1f}}\n",
         now, now, ix, iy, ax, ay,
-        (double)sqrtf(ix*ix + iy*iy),
-        (double)sqrtf(ax*ax + ay*ay));
+        (double)fastLength2(ix, iy),
+        (double)fastLength2(ax, ay));
 }
 
 // ============================================================================

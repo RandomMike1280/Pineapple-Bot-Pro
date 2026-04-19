@@ -225,6 +225,11 @@ public:
     /// Set predictive braking parameters (physics-based overshoot prevention)
     void setPredictiveBraking(float decel_mm_s2, float safety_factor);
 
+    /// Set latency-aware deceleration for the speed governor.
+    /// Caps commanded speed so the robot can always stop within the distance
+    /// it would travel during one network round-trip.
+    void setLatencyAwareDecel(float decel_mm_s2);
+
     /// Set anti-slip / stall detection parameters
     void setSlipDetection(float cmd_thresh, float obs_thresh, int detect_ticks,
                           float boost_factor, int boost_max_ticks);
@@ -394,6 +399,9 @@ private:
     // === Predictive Braking ===
     float _predictiveBrakeDecel;             // assumed deceleration capability (mm/s^2)
     float _predictiveBrakeSafety;            // safety margin factor
+
+    // === Latency-Aware Speed Governor ===
+    float _latencyAwareDecelMmS2;            // deceleration used for latency speed cap (mm/s^2)
 
     // === Anti-Slip Detection ===
     float _slipCmdThresh;                   // min commanded speed to monitor slip

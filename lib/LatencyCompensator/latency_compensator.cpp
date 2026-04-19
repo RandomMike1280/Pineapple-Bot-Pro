@@ -1,6 +1,7 @@
 #include "latency_compensator.hpp"
 #include <math.h>
 #include "../Rotation/Rotation.hpp"
+#include "../Common/opt_math.hpp"
 
 // ============================================================================
 // Construction / Init
@@ -107,7 +108,7 @@ void LatencyCompensator::onCameraUpdate(uint32_t phoneTimestamp,
                       Rotation::normalize(estAngle));
     }
 
-    _lastDriftMagnitude = sqrtf(_lastDriftX * _lastDriftX + _lastDriftY * _lastDriftY);
+    _lastDriftMagnitude = fastLength2(_lastDriftX, _lastDriftY);
 
     // Step 4: Re-ground Kalman state BEFORE setting the dead-reckoning anchor.
     // When camera position diverges from dead-reckoning by > EMERGENCY_THRESHOLD,
