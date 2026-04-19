@@ -9,7 +9,20 @@
 // ============================================================================
 // === Calibration: Speed & Distance Scaling ===
 // ============================================================================
-#define BOT_ID                   "A"       // Robot identity — change to "B" for second robot
+// ============================================================================
+// === Robot Identity ===
+// ============================================================================
+// Comment out IsRobotB → Robot A, ArUco marker ID 0
+// Uncomment IsRobotB   → Robot B, ArUco marker ID 1
+//#define IsRobotB
+
+#ifndef IsRobotB
+  #define BOT_ID                   "A"
+  #define ARUCO_ID                 0
+#else
+  #define BOT_ID                   "B"
+  #define ARUCO_ID                 1
+#endif
 
 #ifndef LED
 #define LED 2                        // Default LED pin if not defined elsewhere
